@@ -1,0 +1,16 @@
+# Text stays LF in the repo; the working copy may use platform endings.
+* text=auto eol=lf
+
+# Binaries must never be line-ending converted. Without this, git mangles the
+# sample receipt PDFs and the OCR wasm payload on checkout.
+*.pdf   binary
+*.xlsx  binary
+*.png   binary
+*.jpg   binary
+*.gz    binary
+*.wasm  binary
+*.traineddata binary
+
+# Vendored third-party bundles: exclude from language stats and diffs.
+vendor/** linguist-vendored
+vendor/** -diff

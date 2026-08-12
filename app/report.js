@@ -1,0 +1,217 @@
+// The audit workbook.
+//
+// This is the deliverable. Not the screen, not a chat answer -- an .xlsx the
+// accountant can file, email to a reviewer, and defend in a year's time.
+//
+// Four tabs:
+//   Summary       counts, what ran, what it could not verify
+//   Audit Detail  every transaction, its status, and its findings
+//   Exceptions    just the rows needing a decision, with sign-off columns
+//   Methodology   the ruleset, the thresholds used, and the stated limits
+//
+// Every transaction appears, not only the exceptions. A report that lists only
+// problems cannot be used as evidence that the other 335 rows were checked.
+
+import { RULESET_VERSION, SEVERITY } from './rules.js';
+
+const STATUS_LABEL = {
+  clean: 'Clean',
+  'needs-review': 'Needs review',
+  exception: 'Exception',
+};
+
+function col(w) { return { wch: w }; }
+
+/** SheetJS writes what it is given; widths and freeze panes are what make the
+ *  file usable the moment it opens, so they are not cosmetic here. */
+function styleSheet(ws, widths, freeze = 'A2') {
+  ws['!cols'] = widths.map(col);
+  ws['!freeze'] = { xSplit: 0, ySplit: 1, topLeftCell: freeze, activePane: 'bottomLeft', state: 'frozen' };
+  ws['!autofilter'] = { ref: ws['!ref'] };
+  return ws;
+}
+
+/** A fingerprint of exactly what was audited and under which thresholds.
+ *
+ *  Re-running the same expense report against the same receipts with the same
+ *  policy produces the same hash, and therefore the same findings. That is what
+ *  lets an auditor defend a conclusion months later: they can show the run was
+ *  reproducible rather than asking a reviewer to trust a one-off answer. An
+ *  LLM-based tool cannot offer this, because it cannot promise the same output
+ *  twice.
+ *
+ *  Returns null on an insecure origin (crypto.subtle needs https or localhost),
+ *  in which case the workbook simply says the hash was unavailable rather than
+ *  printing something untrue. */
+export async function runHash(results, policy) {
+  if (!globalThis.crypto?.subtle) return null;
+  const material = JSON.stringify({
+    ruleset: RULESET_VERSION,
+    policy,
+    rows: results.map((r) => [
+      r.row.txnId, r.row.date, r.row.vendor, r.row.category,
+      r.row.amount, r.row.currency, r.row.receiptFile,
+      r.extraction?.tier ?? null,
+      r.extraction?.fields?.total ?? null,
+      r.findings.map((f) => f.code).sort(),
+    ]),
+  });
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(material));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+export function buildWorkbook(XLSX, results, meta) {
+  const wb = XLSX.utils.book_new();
+  const { policy, generatedAt, reportName, receiptCount, ocrCount, hash } = meta;
+
+  const exceptions = results.filter((r) => r.status === 'exception');
+  const review = results.filter((r) => r.status === 'needs-review');
+  const clean = results.filter((r) => r.status === 'clean');
+
+  const claimed = results.reduce((s, r) => s + (r.row.amount || 0), 0);
+  const flagged = [...exceptions, ...review].reduce((s, r) => s + (r.row.amount || 0), 0);
+
+  // ---- Summary -----------------------------------------------------------
+  const summary = [
+    ['Expense audit summary'],
+    [],
+    ['Report', reportName || 'expense report'],
+    ['Generated', generatedAt],
+    ['Ruleset version', RULESET_VERSION],
+    ['Run hash (SHA-256)', hash || 'unavailable on this origin'],
+    ['', 'Re-running the same inputs under the same policy reproduces this hash.'],
+    [],
+    ['Transactions examined', results.length],
+    ['Support documents read', receiptCount],
+    ['  of which needed OCR', ocrCount],
+    [],
+    ['Clean', clean.length],
+    ['Needs review (soft signals)', review.length],
+    ['Exceptions (require a decision)', exceptions.length],
+    [],
+    ['Total claimed', Number(claimed.toFixed(2))],
+    ['Value on flagged rows', Number(flagged.toFixed(2))],
+    ['Share of value flagged', claimed ? `${((flagged / claimed) * 100).toFixed(1)}%` : 'n/a'],
+    [],
+    ['Findings by rule'],
+  ];
+
+  const byRule = new Map();
+  for (const r of results) {
+    for (const f of r.findings) {
+      if (f.severity === SEVERITY.INFO) continue;
+      byRule.set(f.code, (byRule.get(f.code) || 0) + 1);
+    }
+  }
+  for (const [code, n] of [...byRule].sort((a, b) => b[1] - a[1])) summary.push([`  ${code}`, n]);
+
+  const wsSummary = XLSX.utils.aoa_to_sheet(summary);
+  wsSummary['!cols'] = [col(34), col(46)];
+  XLSX.utils.book_append_sheet(wb, wsSummary, 'Summary');
+
+  // ---- Audit Detail ------------------------------------------------------
+  const detailHeader = [
+    'Txn ID', 'Employee', 'Date', 'Vendor', 'Category', 'Claimed', 'Currency',
+    'Receipt File', 'Receipt Total', 'Receipt Date', 'Receipt Vendor',
+    'Read By', 'Confidence', 'Status', 'Hard', 'Soft', 'Findings',
+  ];
+  const detail = [detailHeader];
+  for (const r of results) {
+    const f = r.extraction?.fields || {};
+    detail.push([
+      r.row.txnId, r.row.employee, r.row.date, r.row.vendor, r.row.category,
+      r.row.amount, r.row.currency, r.row.receiptFile || '',
+      f.total ?? '', f.date ?? '', f.vendor ?? '',
+      r.extraction ? (r.extraction.tier === 'text' ? 'PDF text layer' : r.extraction.tier === 'ocr' ? 'OCR' : 'could not read') : 'no receipt',
+      r.extraction ? `${Math.round(r.extraction.confidence)}%` : '',
+      STATUS_LABEL[r.status], r.hardCount, r.softCount,
+      r.findings.map((x) => `${x.code}: ${x.message}`).join('\n'),
+    ]);
+  }
+  const wsDetail = XLSX.utils.aoa_to_sheet(detail);
+  styleSheet(wsDetail, [10, 20, 11, 26, 20, 11, 9, 16, 13, 12, 26, 15, 11, 13, 7, 7, 90]);
+  XLSX.utils.book_append_sheet(wb, wsDetail, 'Audit Detail');
+
+  // ---- Exceptions --------------------------------------------------------
+  // One row per finding, not per transaction, so a reviewer signs off on each
+  // issue individually rather than on a row that had three different problems.
+  const excHeader = [
+    'Txn ID', 'Severity', 'Rule', 'What was found', 'Claimed', 'Per receipt',
+    'Difference', 'Threshold', 'Receipt File', 'Ruleset',
+    'Reviewer decision', 'Reviewer', 'Date reviewed', 'Note',
+  ];
+  const exc = [excHeader];
+  const order = { hard: 0, soft: 1, info: 2 };
+  const flat = [];
+  for (const r of results) {
+    for (const f of r.findings) {
+      if (f.severity === SEVERITY.INFO) continue;
+      flat.push({ r, f });
+    }
+  }
+  flat.sort((a, b) => (order[a.f.severity] - order[b.f.severity]) || a.r.row.txnId.localeCompare(b.r.row.txnId));
+  for (const { r, f } of flat) {
+    exc.push([
+      r.row.txnId,
+      f.severity === SEVERITY.HARD ? 'Exception' : 'Review',
+      f.code, f.message,
+      f.claimed ?? r.row.amount ?? '',
+      f.receipt ?? r.extraction?.fields?.total ?? '',
+      f.difference ?? '',
+      f.threshold ?? '',
+      r.row.receiptFile || '',
+      f.ruleset,
+      '', '', '', '',                       // reviewer fills these in
+    ]);
+  }
+  const wsExc = XLSX.utils.aoa_to_sheet(exc);
+  styleSheet(wsExc, [10, 11, 22, 82, 11, 12, 11, 11, 16, 9, 18, 16, 14, 34]);
+  XLSX.utils.book_append_sheet(wb, wsExc, 'Exceptions');
+
+  // ---- Methodology -------------------------------------------------------
+  // Stating the limits is not a disclaimer, it is the part that makes the
+  // report honest. A reader must know what was NOT verified.
+  const method = [
+    ['Methodology and limits'],
+    [],
+    ['Ruleset version', RULESET_VERSION],
+    ['Generated', generatedAt],
+    [],
+    ['How each receipt was read'],
+    ['  1. PDF text layer', 'Exact. Used whenever the PDF carries real text.'],
+    ['  2. OCR', 'Used only for image-only PDFs. Confidence is reported per row.'],
+    ['  3. Neither', 'Flagged as UNREADABLE_RECEIPT for manual check. Never guessed.'],
+    [],
+    ['What this report does NOT do'],
+    ['  No bank or card statement was compared', 'Only the expense report and its attached documents were examined. A charge could exist with no row at all and this report would not see it.'],
+    ['  Business purpose was not judged', 'Whether a stated purpose is genuine is a human judgement and was not assessed.'],
+    ['  Mileage and per-diem rows cannot be verified', 'These have no support document by nature. Only arithmetic plausibility can be checked.'],
+    ['  Vendor matching is a similarity score', 'Names are compared fuzzily. The score and threshold are recorded on each finding so a reviewer can second-guess it.'],
+    ['  Nothing was auto-cleared', 'Every exception needs a human decision. A blank reviewer column means the item is still open.'],
+    [],
+    ['Thresholds applied'],
+    ['  Receipt required at or above', policy.receiptRequiredAtOrAbove],
+    ['  Itemization required at or above', policy.itemizationRequiredAtOrAbove],
+    ['  Amount tolerance', policy.amountToleranceAbs],
+    ['  Tip tolerance', `${(policy.tipTolerancePct * 100).toFixed(0)}%`],
+    ['  Date tolerance (days)', policy.dateToleranceDays],
+    ['  Vendor similarity threshold', policy.vendorSimilarityThreshold],
+    ['  Approval threshold', policy.approvalThreshold],
+    ['  Split-transaction window (days)', policy.splitWindowDays],
+    ['  Stale submission (days)', policy.staleSubmissionDays],
+    [],
+    ['Category limits'],
+    ...Object.entries(policy.categoryLimits).map(([k, v]) => [`  ${k}`, v]),
+    [],
+    ['Processing location', 'Every document was read inside this browser on this computer. No file, page or extracted value was uploaded anywhere.'],
+  ];
+  const wsMethod = XLSX.utils.aoa_to_sheet(method);
+  wsMethod['!cols'] = [col(38), col(100)];
+  XLSX.utils.book_append_sheet(wb, wsMethod, 'Methodology');
+
+  return wb;
+}
+
+export function downloadWorkbook(XLSX, wb, filename) {
+  XLSX.writeFile(wb, filename, { compression: true });
+}

@@ -1,0 +1,12 @@
+# Config for the sample-data generator's tooling. The app itself is JavaScript
+# and has no Python runtime dependency.
+
+[tool.vulture]
+min_confidence = 60
+# These are not dead. They are attribute assignments into third-party objects
+# (openpyxl worksheets and cells) and fields read through getattr in Txn.resolved().
+# Vulture cannot see either pattern.
+ignore_names = [
+    "title", "font", "fill", "alignment", "number_format", "freeze_panes",
+    "pdf_currency", "pdf_date", "pdf_vendor", "pdf_total",
+]

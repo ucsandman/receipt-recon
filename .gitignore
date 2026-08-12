@@ -1,0 +1,12 @@
+node_modules/
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
+.env
+.env.local
+*.log
+/tmp/
+.dashclaw-local/
+.offlocal/
+docs/sample-audit.xlsx

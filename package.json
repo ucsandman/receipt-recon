@@ -1,0 +1,15 @@
+{
+  "name": "receipt-recon",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Dev-only harness for running the test suite. The app itself has no build step and no runtime dependencies.",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "sample": "python tools/make_sample_data.py",
+    "serve": "node tools/serve.mjs"
+  },
+  "devDependencies": {
+    "pdfjs-dist": "^5.4.149"
+  }
+}
