@@ -80,6 +80,7 @@ Every rule is deterministic and every threshold is editable in the UI.
 **Documentation**
 - `MISSING_RECEIPT` — no support document, at or above the $75 IRS documentary-evidence floor
 - `NO_RECEIPT_UNDER_FLOOR` — under $75, so a receipt is not required; flags only if amount, date, place or purpose is missing
+- `CATEGORY_EXEMPT_NO_RECEIPT` — mileage and per-diem have no receipt by nature, so they are not asked for one at any amount; still flagged if date, place or purpose is missing. The exempt list is editable and is printed into the workbook, so the suppression is disclosed rather than silent
 - `UNREADABLE_RECEIPT` — the file is there but could not be read; never guessed at
 - `MISSING_ITEMIZATION` — a meal over the threshold with no itemised detail
 
@@ -87,6 +88,7 @@ Every rule is deterministic and every threshold is editable in the UI.
 - `AMOUNT_MISMATCH` — claimed amount differs from the receipt total
 - `UNSUPPORTED_TIP` — claimed exceeds the printed total within a plausible tip band, reported as a soft signal rather than a hard mismatch, so the queue doesn't flood
 - `DATE_MISMATCH` · `VENDOR_MISMATCH` · `CURRENCY_MISMATCH`
+- `CURRENCY_UNVERIFIED` — no currency could be read off the receipt, so the amount check compared two bare numbers and could not confirm they were the same unit. Soft, because it is an unverified assumption rather than a proven violation
 - `RECEIPT_DOES_NOT_FOOT` — subtotal + tax + tip does not equal the printed total, so a number was misread or altered
 
 **Policy**
@@ -148,8 +150,10 @@ need OCR.
 The whole task works without a mouse. Tab reaches both file pickers, the
 transaction id in each row is a real button that opens the evidence drawer on
 Enter, and Escape closes the drawer and puts focus back on the row you came
-from. Progress is announced at milestones instead of on every row, so a 350-row
-run does not read out 350 updates.
+from. On a multi-page receipt the drawer gets Previous and Next controls, so a
+total that sits on page 2 of a hotel folio is reachable by keyboard rather than
+invisible. Progress is announced at milestones instead of on every row, so a
+350-row run does not read out 350 updates.
 
 Every finding states its severity in words next to the colour, so the exception
 tiers survive colour blindness and a black-and-white print of the workbook. Text
@@ -177,7 +181,7 @@ Read these before relying on it.
 ```bash
 npm install          # dev-only; the app itself has zero runtime dependencies
 npm run sample       # regenerate the sample data (needs Python + reportlab, openpyxl, pypdfium2)
-npm test             # 19 unit and integration tests
+npm test             # 37 unit and integration tests
 npm run serve        # http://localhost:8080
 node tools/browser-check.mjs   # drives the real page in a real browser
 node tools/a11y-check.mjs      # keyboard, focus, contrast, sorting, theming
@@ -187,17 +191,25 @@ The two browser checks are the ones that matter, and they answer different
 questions. `browser-check.mjs` asks whether the audit is **correct**: it runs the
 full audit in Chromium, asserts the findings against the answer key, exercises
 the OCR tier, downloads the workbook, and **fails if the page makes a single
-external network request**.
+external network request**. It also corrupts one PDF in a copy of the sample
+folder and asserts the run still renders all 40 rows with exactly one
+`UNREADABLE_RECEIPT`, because one bad file must cost one row and not the run.
 
-`a11y-check.mjs` asks whether the audit is **usable**. Seventeen assertions, each
-one mapped to a defect that shipped in the first version: both file pickers
-reachable by Tab, focus moving into the evidence drawer and back out to the row
-that opened it, the table header actually sticking, sort order including the
-blanks-last rule, theme persistence across a reload, severity stated in words
-rather than colour alone, and **every rendered text node measured against WCAG AA
-in both themes**. The contrast check is measured on the painted page, not
+`a11y-check.mjs` asks whether the audit is **usable**. Twenty-two assertions,
+each one mapped to a defect that shipped in an earlier version: both file
+pickers reachable by Tab, focus moving into the evidence drawer and back out to
+the row that opened it, the table header actually sticking, sort order including
+the blanks-last rule, theme persistence across a reload, severity stated in
+words rather than colour alone, the evidence drawer paging through a multi-page
+receipt by keyboard, re-picking the receipts folder replacing the previous set
+instead of merging with it, and **every rendered text node measured against WCAG
+AA in both themes**. The contrast check is measured on the painted page, not
 calculated from the tokens, so inherited colours and tinted parents cannot hide a
 failure.
+
+Both browser checks build their own fixtures where the sample set cannot cover a
+case: a two-page PDF for the drawer paging check, and a deliberately corrupt one
+for fault isolation.
 
 Everything in `vendor/` is committed on purpose. There is no build step and no CDN,
 because a tool that stops working when a CDN is blocked is no use on a corporate

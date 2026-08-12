@@ -18,6 +18,13 @@ export const DEFAULT_POLICY = {
   receiptRequiredAtOrAbove: 75.00,
   // Lodging always needs a receipt regardless of amount.
   receiptAlwaysRequiredCategories: ['Lodging', 'Hotel'],
+  // Categories that have no support document by nature. The Methodology tab has
+  // always told the reader mileage and per-diem cannot be verified this way; the
+  // engine did not know it, so every such row over the floor produced a
+  // guaranteed HARD MISSING_RECEIPT. Emptying this list restores the old
+  // behaviour, and the list is printed into the workbook so the suppression is
+  // disclosed rather than silent.
+  noReceiptCategories: ['Mileage', 'Per Diem', 'Per-Diem', 'Perdiem'],
   itemizationRequiredAtOrAbove: 75.00,
   itemizationCategories: ['Meals', 'Client Entertainment'],
 
@@ -151,10 +158,35 @@ export function checkRow(row, ext, policy = DEFAULT_POLICY) {
   const cat = row.category || '';
   const amt = typeof row.amount === 'number' ? row.amount : null;
 
+  // The substantiating detail a row must carry whenever no receipt backs it.
+  const missingDetail = () => {
+    const missing = [];
+    if (!row.date) missing.push('date');
+    if (!row.vendor) missing.push('place');
+    if (!row.purpose) missing.push('business purpose');
+    return missing;
+  };
+
   // ---- presence ----------------------------------------------------------
   if (!row.receiptFile) {
     const alwaysNeeded = policy.receiptAlwaysRequiredCategories.includes(cat);
+    const exempt = (policy.noReceiptCategories || []).includes(cat);
     const overFloor = amt !== null && amt >= policy.receiptRequiredAtOrAbove;
+
+    // Exempt by category. Deliberately its own branch rather than reusing the
+    // under-floor one: that message says "under the 75.00 floor", which is
+    // simply false on a 200.00 mileage claim.
+    if (exempt && !alwaysNeeded) {
+      const missing = missingDetail();
+      out.push(finding('CATEGORY_EXEMPT_NO_RECEIPT',
+        missing.length ? SEVERITY.HARD : SEVERITY.INFO,
+        missing.length
+          ? `${cat} has no support document by nature, so no receipt is required, but this row is missing: ${missing.join(', ')}.`
+          : `${cat} has no support document by nature. No receipt required, and the row carries amount, date, place and purpose.`,
+        { category: cat, actual: amt, exemptCategories: policy.noReceiptCategories }));
+      return out;
+    }
+
     if (alwaysNeeded || overFloor) {
       out.push(finding('MISSING_RECEIPT', SEVERITY.HARD,
         `No support document attached for ${amt !== null ? amt.toFixed(2) : 'this expense'}` +
@@ -164,10 +196,7 @@ export function checkRow(row, ext, policy = DEFAULT_POLICY) {
     } else {
       // Under the floor a receipt is not required, but the row still has to
       // carry the substantiating detail. Saying so is more useful than silence.
-      const missing = [];
-      if (!row.date) missing.push('date');
-      if (!row.vendor) missing.push('place');
-      if (!row.purpose) missing.push('business purpose');
+      const missing = missingDetail();
       out.push(finding('NO_RECEIPT_UNDER_FLOOR',
         missing.length ? SEVERITY.HARD : SEVERITY.INFO,
         missing.length
@@ -225,6 +254,16 @@ export function checkRow(row, ext, policy = DEFAULT_POLICY) {
       `Receipt is denominated in ${f.currency} but the report books this row as ${row.currency}. ` +
       `Confirm an FX conversion was applied; booking the face value across currencies misstates the amount.`,
       { receiptCurrency: f.currency, sheetCurrency: row.currency }));
+  } else if (!f.currency && row.currency && f.total !== null && f.total !== undefined && amt !== null) {
+    // The amount check above just compared two bare numbers. It is only a valid
+    // comparison if both are in the same unit, and here that could not be
+    // confirmed. Saying so is the difference between an unverified assumption
+    // and a silent one.
+    out.push(finding('CURRENCY_UNVERIFIED', SEVERITY.SOFT,
+      `No currency could be read from ${row.receiptFile}, so the amount comparison assumed a ` +
+      `single currency (${row.currency}) and could not confirm it. If this receipt is in another ` +
+      `currency, the amount check above is not meaningful.`,
+      { sheetCurrency: row.currency, receiptFile: row.receiptFile }));
   }
 
   // ---- date --------------------------------------------------------------
@@ -356,9 +395,14 @@ export function checkBatch(rows, policy = DEFAULT_POLICY) {
   }
   for (const group of seen.values()) {
     if (group.length < 2) continue;
-    // Already reported above if they share one file.
-    const files = new Set(group.map((g) => (g.receiptFile || '').toLowerCase()));
-    if (files.size <= 1) continue;
+    // Exempt only when DUPLICATE_RECEIPT genuinely already reported this group,
+    // which needs every row to cite a file AND all of them to be the same one.
+    // Testing `files.size <= 1` also swallowed the case where NO row cites a
+    // file: that collapses to a set of one empty string, while DUPLICATE_RECEIPT
+    // skips blank-receipt rows entirely, so two receiptless claims of the same
+    // vendor, date and amount were reported by neither rule.
+    const cited = group.map((g) => (g.receiptFile || '').toLowerCase()).filter(Boolean);
+    if (cited.length === group.length && new Set(cited).size === 1) continue;
     const ids = group.map((g) => g.txnId);
     for (const r of group) {
       add(r.txnId, finding('DUPLICATE_CHARGE', SEVERITY.HARD,

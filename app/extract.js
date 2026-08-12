@@ -8,8 +8,19 @@
 // Tier 3 is a feature. An audit tool that guesses when it cannot read a
 // document is worse than one that says "read this one yourself".
 
-const CURRENCY_SYMBOLS = { $: 'USD', '€': 'EUR', '£': 'GBP', '¥': 'JPY' };
-const CURRENCY_CODES = ['USD', 'EUR', 'GBP', 'CAD', 'AUD', 'JPY', 'CHF', 'SEK', 'NOK', 'DKK', 'MXN', 'INR'];
+const CURRENCY_SYMBOLS = { $: 'USD', '€': 'EUR', '£': 'GBP', '¥': 'JPY', '₹': 'INR', '₩': 'KRW', '₪': 'ILS', '₫': 'VND', '₺': 'TRY', '₱': 'PHP' };
+
+// The old list was twelve codes. Anything outside it returned null, and because
+// CURRENCY_MISMATCH is gated on a parsed currency, an SGD or ZAR receipt raised
+// no currency finding at all while the amount check above it still compared the
+// claimed number against the receipt total as if they were the same unit.
+const CURRENCY_CODES = [
+  'USD', 'EUR', 'GBP', 'CAD', 'AUD', 'NZD', 'JPY', 'CHF', 'SEK', 'NOK', 'DKK',
+  'MXN', 'INR', 'SGD', 'HKD', 'CNY', 'KRW', 'TWD', 'THB', 'MYR', 'IDR', 'PHP',
+  'VND', 'ZAR', 'BRL', 'ARS', 'CLP', 'COP', 'PEN', 'PLN', 'CZK', 'HUF', 'RON',
+  'BGN', 'ISK', 'TRY', 'ILS', 'AED', 'SAR', 'QAR', 'KWD', 'EGP', 'NGN', 'KES',
+  'PKR', 'BDT', 'LKR', 'RUB', 'UAH',
+];
 
 // Order matters: longest alternates first, so "TOTAL DUE" is not shadowed by
 // a bare "TOTAL". The \b is load-bearing -- without it, a case-insensitive
@@ -52,14 +63,28 @@ function parseTotal(text) {
   // No total label at all (common on rideshare and minimal receipts).
   // Fall back to the largest money figure on the page, but say so, because
   // "largest number wins" is a guess and the auditor deserves to know.
-  const all = [...text.matchAll(RE_MONEY_ANY)].map((m) => num(m[1])).filter((v) => v !== null);
-  if (all.length) return { value: Math.max(...all), basis: 'largest-figure-guess' };
+  // reduce, not Math.max(...all): a receipt carrying six figures of money
+  // matches spreads that wide over the argument stack and throws a RangeError.
+  // Because parseFields runs outside extractReceipt's try, that escaped and
+  // took down the whole run rather than this one row.
+  let best = null;
+  for (const m of text.matchAll(RE_MONEY_ANY)) {
+    const v = num(m[1]);
+    if (v !== null && (best === null || v > best)) best = v;
+  }
+  if (best !== null) return { value: best, basis: 'largest-figure-guess' };
   return { value: null, basis: 'none' };
 }
 
+const RE_CODE_NEAR_NUMBER = new RegExp(
+  `\\b(${CURRENCY_CODES.join('|')})\\b\\s*[\\d]|[\\d]\\s*\\b(${CURRENCY_CODES.join('|')})\\b`);
+
 function parseCurrency(text) {
-  const code = text.match(new RegExp(`\\b(${CURRENCY_CODES.join('|')})\\b`));
-  if (code) return code[1];
+  // A code sitting next to a number is how a currency actually appears on a
+  // receipt. Matching a bare code anywhere would let "PLEASE TRY OUR APP" book
+  // the row as Turkish lira, and the wider code list above makes that likelier.
+  const near = text.match(RE_CODE_NEAR_NUMBER);
+  if (near) return near[1] || near[2];
   for (const [sym, cur] of Object.entries(CURRENCY_SYMBOLS)) {
     if (text.includes(sym)) return cur;
   }
@@ -190,14 +215,34 @@ async function readTextLayer(pdfjsLib, bytes) {
 // Tier 2: render the page and OCR it
 // --------------------------------------------------------------------------
 
-async function renderToCanvas(doc, scale = 3.0) {
+export const OCR_SCALE = 3.0;
+
+// Roughly 160 MB of RGBA backing store. A US Letter page at 3.0x is 4.4M px, so
+// every real receipt renders untouched and only an absurd page box is clamped.
+export const MAX_RASTER_PX = 40_000_000;
+
+/** The scale to actually render at.
+ *
+ *  A PDF may declare a page box up to 14400x14400 pt. At a fixed 3.0x that is
+ *  43200x43200 px, about 7.5 GB. The dangerous outcome is not the crash: it is
+ *  a blank canvas, which OCR then reads as nothing, which parseFields reports
+ *  as "no monetary amount found", which looks like a real result. */
+export function clampScale(width, height, desired = OCR_SCALE) {
+  const area = width * height;
+  if (!(area > 0)) return desired;
+  return Math.min(desired, Math.sqrt(MAX_RASTER_PX / area));
+}
+
+async function renderToCanvas(doc, desired = OCR_SCALE) {
   const page = await doc.getPage(1);
+  const base = page.getViewport({ scale: 1 });
+  const scale = clampScale(base.width, base.height, desired);
   const viewport = page.getViewport({ scale });
   const canvas = document.createElement('canvas');
   canvas.width = Math.ceil(viewport.width);
   canvas.height = Math.ceil(viewport.height);
   await page.render({ canvasContext: canvas.getContext('2d', { willReadFrequently: true }), viewport, canvas }).promise;
-  return canvas;
+  return { canvas, scale, downscaled: scale < desired };
 }
 
 // --------------------------------------------------------------------------
@@ -242,13 +287,20 @@ export async function extractReceipt(bytes, deps) {
   }
 
   try {
-    const canvas = await renderToCanvas(doc);
+    const { canvas, scale, downscaled } = await renderToCanvas(doc);
     const worker = await getOcrWorker();
     const { data } = await worker.recognize(canvas);
     canvas.width = canvas.height = 0; // release the bitmap promptly
     await task.destroy();
 
     const fields = parseFields(data.text);
+    if (downscaled) {
+      // rules.js turns any string in fields.warnings into a visible SOFT
+      // EXTRACTION_WARNING, so a degraded read is never mistaken for a clean one.
+      fields.warnings.push(
+        `Receipt page is unusually large, so it was rendered at ${scale.toFixed(2)}x instead of ` +
+        `${OCR_SCALE.toFixed(2)}x to stay within a safe canvas size. Text may have been harder to read.`);
+    }
     if (data.confidence < 70) {
       fields.warnings.push(
         `Low OCR confidence (${data.confidence.toFixed(0)}%). Verify this receipt by hand.`);

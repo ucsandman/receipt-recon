@@ -10,6 +10,9 @@
 // here maps to a defect that shipped in the MVP, so it is a regression guard,
 // not a checklist.
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { chromium } from 'playwright';
 
 const BASE = process.env.BASE || 'http://localhost:8080';
@@ -258,6 +261,119 @@ const overflow = await page.evaluate(() =>
 assert.ok(overflow <= 1, `page scrolls horizontally by ${overflow}px at 375px wide`);
 pass('no horizontal page scroll at 375px');
 await page.screenshot({ path: `${SHOTS}/05-mobile.png`, fullPage: false });
+
+// ---- 14. the Clear receipts control is real, reachable, and named ----
+await page.setViewportSize({ width: 1440, height: 1000 });
+await page.waitForTimeout(150);
+const clearBtn = page.locator('#btnClearReceipts');
+assert.equal(await clearBtn.isVisible(), true,
+  'Clear receipts must be visible once receipts are loaded');
+assert.match((await clearBtn.textContent()).trim(), /clear receipts/i,
+  'the control needs an accessible name, not an icon alone');
+assert.equal(await page.evaluate(() => {
+  const el = document.getElementById('btnClearReceipts');
+  el.focus();
+  return document.activeElement === el;
+}), true, '#btnClearReceipts must be keyboard focusable');
+pass('Clear receipts is visible, focusable, and has an accessible name');
+
+// ---- 15. a single-page receipt grows no page controls --------------------
+// Checked here, while the sample receipts are still loaded and every one of
+// them is a single page.
+await page.click('#resultBody tr[data-txn="TX-1001"]');
+await page.waitForSelector('#panel:not([hidden])');
+await page.waitForSelector('#panelPdf canvas', { timeout: 30000 });
+assert.equal(await page.locator('#panelPdf .pdfnav').count(), 0,
+  'a single-page receipt must not grow page controls');
+pass('single-page receipts render no page controls');
+await page.keyboard.press('Escape');
+await page.waitForSelector('#panel[hidden]', { state: 'attached' });
+
+// ---- 16. picking the receipts folder again REPLACES the previous set ------
+// Nothing ever cleared state.receipts, so a wrong folder then a right one left
+// stale PDFs eligible to be resolved and cited as evidence. Two pages, so this
+// doubles as the fixture for the evidence-drawer paging check below.
+function twoPagePdf() {
+  const objs = [
+    '<</Type/Catalog/Pages 2 0 R>>',
+    '<</Type/Pages/Kids[3 0 R 6 0 R]/Count 2>>',
+    '<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 200]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>',
+    null,   // 4: page 1 content stream, filled below
+    '<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>',
+    '<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 200]/Contents 7 0 R/Resources<</Font<</F1 5 0 R>>>>>>',
+    null,   // 7: page 2 content stream
+  ];
+  const stream = (text) => {
+    const body = `BT /F1 14 Tf 20 100 Td (${text}) Tj ET`;
+    return `<</Length ${body.length}>>stream\n${body}\nendstream`;
+  };
+  objs[3] = stream('LEDGERWAY HOTEL  TOTAL: $240.00');
+  objs[6] = stream('PAGE TWO  FOLIO DETAIL');
+
+  let out = '%PDF-1.4\n';
+  const offsets = [];
+  objs.forEach((o, i) => {
+    offsets.push(out.length);
+    out += `${i + 1} 0 obj\n${o}\nendobj\n`;
+  });
+  const xref = out.length;
+  out += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n`;
+  for (const off of offsets) out += `${String(off).padStart(10, '0')} 00000 n \n`;
+  out += `trailer\n<</Size ${objs.length + 1}/Root 1 0 R>>\nstartxref\n${xref}\n%%EOF\n`;
+  return Buffer.from(out, 'latin1');
+}
+
+// #fileReceipts carries webkitdirectory, so the picker takes a directory path
+// rather than in-memory buffers. resolveReceipt falls back to matching on the
+// transaction id, so naming the file after a real row is enough to attach it.
+const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'recon-a11y-'));
+fs.writeFileSync(path.join(fixtureDir, 'TX-1000.pdf'), twoPagePdf());
+await page.setInputFiles('#fileReceipts', fixtureDir);
+await page.waitForFunction(() => /^1 PDF loaded/.test(document.getElementById('statusReceipts').textContent));
+const afterRepick = await page.textContent('#statusReceipts');
+assert.match(afterRepick, /^1 PDF loaded/,
+  `re-picking the folder must replace the previous set, got "${afterRepick}"`);
+pass('re-picking the receipts folder replaces the previous set rather than merging');
+
+// ---- 17. the evidence drawer can reach page 2 --------------------------
+// The results table is already on screen from the sample run, and the progress
+// text already reads "Done.", so both would satisfy a wait before this run had
+// started. Stamp a sentinel so the wait means something.
+await page.evaluate(() => { document.getElementById('progText').textContent = 'rerunning'; });
+await page.click('#btnRun');
+await page.waitForFunction(() => /^Done\./.test(document.getElementById('progText').textContent),
+  null, { timeout: 180000 });
+
+await page.click('#resultBody tr[data-txn="TX-1000"]');
+await page.waitForSelector('#panel:not([hidden])');
+await page.waitForSelector('#panelPdf .pdfnav', { timeout: 30000 });
+assert.equal((await page.textContent('#pdfPageLabel')).trim(), 'Page 1 of 2');
+const nextBtn = page.locator('#panelPdf .pdfnav button', { hasText: 'Next page' });
+await nextBtn.focus();
+assert.equal(await page.evaluate(() => document.activeElement?.textContent?.trim()), 'Next page',
+  'the page control must be reachable by keyboard');
+await page.keyboard.press('Enter');
+await page.waitForFunction(() =>
+  document.getElementById('pdfPageLabel')?.textContent.trim() === 'Page 2 of 2', null, { timeout: 15000 });
+pass('evidence drawer pages through a multi-page receipt with Enter');
+await page.keyboard.press('Escape');
+await page.waitForSelector('#panel[hidden]', { state: 'attached' });
+
+// ---- 18. one unreadable file costs one row, not the run ------------------
+// Every row except TX-1000 now cites a receipt that is no longer loaded, which
+// is the file-not-found path. The run must still finish and render every row.
+const survived = await page.evaluate(() => ({
+  rows: document.querySelectorAll('#resultBody tr[data-txn]').length,
+  unreadable: [...document.querySelectorAll('#resultBody tr[data-txn]')]
+    .filter((tr) => tr.textContent.includes('UNREADABLE_RECEIPT')).length,
+}));
+assert.ok(survived.rows > 0, 'the run produced no rows at all');
+assert.ok(survived.unreadable > 0,
+  'missing receipts must surface as findings on their own rows, not kill the run');
+assert.equal(survived.rows, 40, `expected all 40 rows to survive, got ${survived.rows}`);
+pass(`a run with ${survived.unreadable} unreadable receipts still rendered all ${survived.rows} rows`);
+
+fs.rmSync(fixtureDir, { recursive: true, force: true });
 
 assert.deepEqual(errors, [], `console errors: ${errors.join(' | ')}`);
 pass('no console errors across the whole run');

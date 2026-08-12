@@ -6,7 +6,7 @@
 // rather than just asserting it.
 
 import * as pdfjsLib from '../vendor/pdf.min.mjs';
-import { extractReceipt } from './extract.js';
+import { extractReceipt, clampScale } from './extract.js';
 import { mapHeaders, normalizeDate, toNumber } from './sheet.js';
 import { auditAll, DEFAULT_POLICY } from './rules.js';
 import { buildWorkbook, downloadWorkbook, runHash } from './report.js';
@@ -27,6 +27,7 @@ const state = {
   selectedTxn: null,
   lastTrigger: null,     // element focus returns to when the panel closes
   panelToken: 0,         // guards against a slow PDF render landing in a newer panel
+  panelTask: null,       // the open drawer's PDF, kept alive for page navigation
   ocrWorker: null,
   ocrUsed: 0,
   reportName: '',
@@ -174,25 +175,37 @@ async function runAudit() {
     let announcedAt = 0;
 
     for (const row of state.rows) {
-      const file = resolveReceipt(row);
-      // The sheet claims a receipt but the folder has no such file. That is a
-      // real finding, so record the intent and let the rules engine report it.
-      if (!file) {
-        if (row.receiptFile) {
-          extractions.set(row.txnId, {
-            tier: 'failed', confidence: 0, text: '', fields: { warnings: [] },
-            error: `File "${row.receiptFile}" was not found among the receipts you loaded.`,
-          });
+      // One bad file costs one row, not the run.
+      //
+      // Every row used to sit inside a single try wrapping the whole loop, and
+      // its catch never assigned state.results. So one receipt that threw threw
+      // away every row already processed, including minutes of OCR, with no
+      // partial output and no way to tell which file did it. The failed shape
+      // recorded below is the same one the file-not-found branch writes, and
+      // rules.js already turns it into a HARD UNREADABLE_RECEIPT naming the row.
+      try {
+        const file = resolveReceipt(row);
+        // The sheet claims a receipt but the folder has no such file. That is a
+        // real finding, so record the intent and let the rules engine report it.
+        if (!file) {
+          if (row.receiptFile) {
+            extractions.set(row.txnId, {
+              tier: 'failed', confidence: 0, text: '', fields: { warnings: [] },
+              error: `File "${row.receiptFile}" was not found among the receipts you loaded.`,
+            });
+          }
+        } else {
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          const res = await extractReceipt(bytes, { pdfjsLib, getOcrWorker });
+          if (res.tier === 'ocr') state.ocrUsed++;
+          extractions.set(row.txnId, res);
         }
-        done++;
-        setProgress((done / total) * 100, `${done} of ${total} rows`);
-        continue;
+      } catch (err) {
+        extractions.set(row.txnId, {
+          tier: 'failed', confidence: 0, text: '', fields: { warnings: [] },
+          error: `This receipt could not be processed: ${err.message}`,
+        });
       }
-
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      const res = await extractReceipt(bytes, { pdfjsLib, getOcrWorker });
-      if (res.tier === 'ocr') state.ocrUsed++;
-      extractions.set(row.txnId, res);
 
       done++;
       const pct = (done / total) * 100;
@@ -410,6 +423,7 @@ async function openPanel(txnId, tr) {
   // Clicking a second row while the first is still rendering must not append
   // that first canvas into the second row's panel.
   const token = ++state.panelToken;
+  releasePanelPdf();
   const file = resolveReceipt(r.row);
   if (!file) {
     holder.innerHTML = '<p class="microcopy">No support document was loaded for this row.</p>';
@@ -418,18 +432,79 @@ async function openPanel(txnId, tr) {
   try {
     const task = pdfjsLib.getDocument({ data: new Uint8Array(await file.arrayBuffer()) });
     const doc = await task.promise;
-    const page = await doc.getPage(1);
-    const viewport = page.getViewport({ scale: 1.5 });
-    const canvas = document.createElement('canvas');
-    canvas.width = viewport.width; canvas.height = viewport.height;
-    await page.render({ canvasContext: canvas.getContext('2d'), viewport, canvas }).promise;
-    await task.destroy();
-    if (token !== state.panelToken) return;
-    holder.replaceChildren(canvas);
+    if (token !== state.panelToken) { await task.destroy(); return; }
+    // Held open so the page controls can render other pages. Released by
+    // releasePanelPdf() when the drawer closes or another row is opened.
+    state.panelTask = task;
+    await renderPanelPdf(doc, task, token);
   } catch {
     if (token !== state.panelToken) return;
     holder.innerHTML = '<p class="microcopy">This receipt could not be displayed.</p>';
   }
+}
+
+/** The evidence drawer used to hardcode page 1, while the extractor reads up to
+ *  10 pages and hotel folios are its own named example. When the flagged total
+ *  or the itemization sat on page 2, the auditor could not see the evidence for
+ *  the finding anywhere in the tool. */
+async function renderPanelPdf(doc, task, token) {
+  const holder = $('panelPdf');
+  const pages = doc.numPages;
+  let current = 1;
+
+  const canvas = document.createElement('canvas');
+  const nav = document.createElement('div');
+  nav.className = 'pdfnav';
+  const prev = document.createElement('button');
+  const next = document.createElement('button');
+  const label = document.createElement('span');
+  prev.type = next.type = 'button';
+  prev.className = next.className = 'btn quiet small';
+  prev.textContent = 'Previous page';
+  next.textContent = 'Next page';
+  label.className = 'pdfnav-label';
+  label.id = 'pdfPageLabel';
+  // The canvas is the thing that changes, so point the live region at it.
+  holder.setAttribute('aria-live', 'polite');
+  nav.append(prev, label, next);
+
+  const paint = async () => {
+    const page = await doc.getPage(current);
+    const base = page.getViewport({ scale: 1 });
+    // Same clamp as the OCR tier: an absurd page box must not try to allocate
+    // gigabytes here either.
+    const viewport = page.getViewport({ scale: clampScale(base.width, base.height, 1.5) });
+    canvas.width = Math.ceil(viewport.width);
+    canvas.height = Math.ceil(viewport.height);
+    await page.render({ canvasContext: canvas.getContext('2d'), viewport, canvas }).promise;
+    if (token !== state.panelToken) return;
+    label.textContent = `Page ${current} of ${pages}`;
+    prev.disabled = current === 1;
+    next.disabled = current === pages;
+  };
+
+  const go = async (delta) => {
+    const want = Math.min(pages, Math.max(1, current + delta));
+    if (want === current) return;
+    current = want;
+    await paint();
+  };
+  prev.addEventListener('click', () => go(-1));
+  next.addEventListener('click', () => go(1));
+
+  await paint();
+  if (token !== state.panelToken) { await task.destroy(); return; }
+  // Single-page receipts get no controls; there is nothing to navigate.
+  holder.replaceChildren(...(pages > 1 ? [nav, canvas] : [canvas]));
+}
+
+/** The drawer holds its PDF open so the page controls work, so something has to
+ *  let it go. Without this, opening 350 rows in a session keeps 350 documents
+ *  alive. */
+function releasePanelPdf() {
+  const task = state.panelTask;
+  state.panelTask = null;
+  if (task) Promise.resolve(task.destroy()).catch(() => { /* already gone */ });
 }
 
 function closePanel({ restoreFocus = true } = {}) {
@@ -437,6 +512,7 @@ function closePanel({ restoreFocus = true } = {}) {
   if (panel.hidden) return;
   panel.hidden = true;
   state.panelToken++;
+  releasePanelPdf();
   if (restoreFocus) state.lastTrigger?.focus();
   state.lastTrigger = null;
 }
@@ -467,7 +543,18 @@ function renderPolicy() {
     <div class="policy-item">
       <label for="pc_${cat}">Limit: ${esc(cat)}</label>
       <input id="pc_${cat}" data-cat="${esc(cat)}" type="number" step="any" value="${v}">
-    </div>`).join('');
+    </div>`).join('') + `
+    <div class="policy-item wide">
+      <label for="p_noReceiptCategories">Categories with no receipt by nature</label>
+      <input id="p_noReceiptCategories" type="text"
+             value="${esc((state.policy.noReceiptCategories || []).join(', '))}">
+      <span class="policy-hint">Comma separated. These are never asked for a receipt, at any amount, and the list is printed into the workbook.</span>
+    </div>`;
+
+  $('p_noReceiptCategories').addEventListener('change', (e) => {
+    state.policy.noReceiptCategories = e.target.value
+      .split(',').map((s) => s.trim()).filter(Boolean);
+  });
 
   for (const [key] of POLICY_FIELDS) {
     $(`p_${key}`).addEventListener('change', (e) => {
@@ -508,15 +595,42 @@ async function acceptSheet(file) {
   updateRunButton();
 }
 
-function acceptReceipts(files) {
+function paintReceiptStatus(skipped = 0) {
+  const n = state.receipts.size;
+  $('statusReceipts').textContent = n
+    ? `${n} PDF${n === 1 ? '' : 's'} loaded${skipped ? ` · ${skipped} non-PDF ignored` : ''}`
+    : 'No receipts chosen';
+  $('dropReceipts').classList.toggle('filled', n > 0);
+  $('btnClearReceipts').hidden = n === 0;
+  updateRunButton();
+}
+
+/** @param replace  true when the whole set is being chosen again.
+ *
+ *  Picking the folder is always a complete choice, so a second pick replaces
+ *  the first. Nothing ever cleared this Map before, so choosing the wrong
+ *  folder and then the right one left every file from the wrong one still
+ *  eligible: resolveReceipt matches generously on basename and txn id, so a
+ *  stale PDF could be resolved and then cited as evidence in the workbook.
+ *  Drag and drop stays additive, because dropping is how you add a few
+ *  stragglers to a set you already have. */
+function acceptReceipts(files, { replace = false } = {}) {
+  if (replace) state.receipts.clear();
+  let skipped = 0;
   for (const f of files) {
     if (f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf')) {
       state.receipts.set(f.name.split(/[\\/]/).pop().toLowerCase(), f);
+    } else {
+      skipped++;
     }
   }
-  $('statusReceipts').textContent = `${state.receipts.size} PDF${state.receipts.size === 1 ? '' : 's'} loaded`;
-  $('dropReceipts').classList.toggle('filled', state.receipts.size > 0);
-  updateRunButton();
+  paintReceiptStatus(skipped);
+}
+
+function clearReceipts() {
+  state.receipts.clear();
+  paintReceiptStatus();
+  announce('Receipts cleared.');
 }
 
 function showBanner(msg) {
@@ -593,7 +707,7 @@ async function loadSample() {
       const blob = await fetch(`sample-data/receipts/${name}`).then((r) => r.blob());
       files.push(new File([blob], name, { type: 'application/pdf' }));
     }
-    acceptReceipts(files);
+    acceptReceipts(files, { replace: true });
     await runAudit();
   } catch (err) {
     showBanner(err.message);
@@ -613,7 +727,9 @@ function init() {
   }
 
   $('fileSheet').addEventListener('change', (e) => e.target.files[0] && acceptSheet(e.target.files[0]));
-  $('fileReceipts').addEventListener('change', (e) => acceptReceipts([...e.target.files]));
+  // A folder pick replaces the set; a drop adds to it.
+  $('fileReceipts').addEventListener('change', (e) => acceptReceipts([...e.target.files], { replace: true }));
+  $('btnClearReceipts').addEventListener('click', clearReceipts);
   wireDrop('dropSheet', (files) => acceptSheet(files[0]));
   wireDrop('dropReceipts', (files) => acceptReceipts(files));
 

@@ -10,6 +10,7 @@
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { chromium } from 'playwright';
 
@@ -143,6 +144,44 @@ await download.saveAs(out);
 const size = fs.statSync(out).size;
 assert.ok(size > 8000, `workbook looks too small (${size} bytes)`);
 ok(`audit workbook downloads (${(size / 1024).toFixed(1)} KB) -> ${out}`);
+
+// ---- one corrupt file must cost one row, not the whole run ---------------
+// runAudit used to wrap all 350 rows in a single try whose catch never assigned
+// state.results, so one bad PDF discarded every row already processed, with no
+// partial output and no way to tell which file did it.
+const corruptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'recon-corrupt-'));
+const receiptDir = 'sample-data/receipts';
+for (const name of fs.readdirSync(receiptDir)) {
+  fs.copyFileSync(path.join(receiptDir, name), path.join(corruptDir, name));
+}
+const victim = 'TX-1000.pdf';
+fs.writeFileSync(path.join(corruptDir, victim), Buffer.from('%PDF-1.4\nthis is not a pdf\n'));
+
+await page.setInputFiles('#fileReceipts', corruptDir);
+await page.waitForFunction(
+  (n) => new RegExp(`^${n} PDFs loaded`).test(document.getElementById('statusReceipts').textContent),
+  fs.readdirSync(corruptDir).length);
+// The previous run already left "Done." in the progress text, so waiting for it
+// would return before this run had even started. Stamp a sentinel first.
+await page.evaluate(() => { document.getElementById('progText').textContent = 'rerunning'; });
+await page.click('#btnRun');
+await page.waitForFunction(() => /^Done\./.test(document.getElementById('progText').textContent),
+  null, { timeout: 180000 });
+
+const afterCorrupt = await page.evaluate(() => {
+  const rows = [...document.querySelectorAll('#resultBody tr[data-txn]')];
+  return {
+    rows: rows.length,
+    unreadable: rows.filter((tr) => tr.textContent.includes('UNREADABLE_RECEIPT'))
+      .map((tr) => tr.dataset.txn),
+  };
+});
+assert.equal(afterCorrupt.rows, TRUTH.transactions.length,
+  `one corrupt PDF must not cost the run: expected ${TRUTH.transactions.length} rows, got ${afterCorrupt.rows}`);
+assert.deepEqual(afterCorrupt.unreadable, ['TX-1000'],
+  `exactly the corrupt row should be unreadable, got [${afterCorrupt.unreadable.join(', ')}]`);
+ok(`one corrupt PDF costs exactly one row: ${afterCorrupt.rows} rows rendered, ${afterCorrupt.unreadable[0]} flagged`);
+fs.rmSync(corruptDir, { recursive: true, force: true });
 
 // ---- the privacy claim ---------------------------------------------------
 assert.deepEqual(externalRequests, [],

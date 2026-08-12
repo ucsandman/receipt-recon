@@ -155,6 +155,113 @@ test('vendor matching tolerates real-world name variants', () => {
     'genuinely different vendors must score low');
 });
 
+// A minimal readable extraction, so a rule can be exercised without a PDF.
+function ext(fields = {}) {
+  return {
+    tier: 'text', confidence: 100, text: fields.text ?? 'RECEIPT\nTOTAL: $100.00',
+    fields: { total: 100, subtotal: null, tax: null, tip: null, currency: 'USD',
+              date: null, vendor: null, warnings: [], ...fields },
+  };
+}
+function row(over = {}) {
+  return {
+    txnId: 'T1', employee: 'A', date: '2026-07-02', vendor: 'Bluebird Diner',
+    category: 'Meals', amount: 100, currency: 'USD', receiptFile: null,
+    purpose: 'Client lunch', approver: 'M', ...over,
+  };
+}
+const codes = (r) => r.findings.map((f) => f.code);
+const find = (r, code) => r.findings.find((f) => f.code === code);
+
+test('a mileage claim is not asked for a receipt it can never have', () => {
+  // report.js Methodology already tells the reader mileage and per-diem have no
+  // support document by nature. The engine did not know that, so every such row
+  // over the floor produced a guaranteed HARD MISSING_RECEIPT, every month.
+  const [r] = auditAll([row({ category: 'Mileage', amount: 200, receiptFile: null })],
+    new Map(), DEFAULT_POLICY);
+  assert.ok(!codes(r).includes('MISSING_RECEIPT'),
+    'a mileage row must not be asked for a receipt');
+  for (const f of r.findings) {
+    assert.doesNotMatch(f.message, /floor/i,
+      'the under-floor wording is false for a 200.00 claim and must not be reused');
+  }
+});
+
+test('an exempt category still has to carry its substantiating detail', () => {
+  const [r] = auditAll([row({ category: 'Per Diem', amount: 200, receiptFile: null, purpose: '' })],
+    new Map(), DEFAULT_POLICY);
+  const f = find(r, 'CATEGORY_EXEMPT_NO_RECEIPT');
+  assert.ok(f, 'an exempt row missing detail must still raise a finding');
+  assert.equal(f.severity, SEVERITY.HARD);
+  assert.match(f.message, /business purpose/i, 'the finding must name what is missing');
+});
+
+test('the exempt-category list is policy, not a hardcoded carve-out', () => {
+  const strict = auditAll([row({ category: 'Mileage', amount: 200, receiptFile: null })],
+    new Map(), { ...DEFAULT_POLICY, noReceiptCategories: [] });
+  assert.ok(codes(strict[0]).includes('MISSING_RECEIPT'),
+    'emptying the exempt list must bring the receipt requirement back');
+});
+
+test('two receiptless claims of the same charge are caught by something', () => {
+  // DUPLICATE_CHARGE skipped any group whose file set had one member, on the
+  // comment "already reported above if they share one file". But
+  // DUPLICATE_RECEIPT skips blank-receipt rows entirely, so a pair of
+  // receiptless identical claims fell through both rules.
+  const rows = [
+    row({ txnId: 'T1', receiptFile: null }),
+    row({ txnId: 'T2', receiptFile: null }),
+  ];
+  const results = auditAll(rows, new Map(), DEFAULT_POLICY);
+  for (const r of results) {
+    assert.ok(codes(r).includes('DUPLICATE_CHARGE'),
+      `${r.row.txnId}: same vendor, date and amount claimed twice with no receipt either time`);
+  }
+});
+
+test('rows genuinely sharing one receipt are still only reported once', () => {
+  // The control for the case above: when both rows cite the same real file,
+  // DUPLICATE_RECEIPT owns it and DUPLICATE_CHARGE must stay quiet.
+  const rows = [
+    row({ txnId: 'T1', receiptFile: 'TX-1000.pdf' }),
+    row({ txnId: 'T2', receiptFile: 'TX-1000.pdf' }),
+  ];
+  const extractions = new Map([['T1', ext()], ['T2', ext()]]);
+  const results = auditAll(rows, extractions, DEFAULT_POLICY);
+  for (const r of results) {
+    assert.ok(codes(r).includes('DUPLICATE_RECEIPT'), 'the shared-file rule still fires');
+    assert.ok(!codes(r).includes('DUPLICATE_CHARGE'),
+      'one duplicate must not be reported twice under two rule names');
+  }
+});
+
+test('an unreadable currency does not let the amount check compare two units silently', () => {
+  const rows = [row({ receiptFile: 'r.pdf', amount: 100, currency: 'USD' })];
+  const extractions = new Map([['T1', ext({ currency: null, total: 100 })]]);
+  const [r] = auditAll(rows, extractions, DEFAULT_POLICY);
+  const f = find(r, 'CURRENCY_UNVERIFIED');
+  assert.ok(f, 'the amount was compared as a bare number; that assumption must be stated');
+  assert.equal(f.severity, SEVERITY.SOFT, 'unverified is a signal, not a violation');
+  assert.match(f.message, /single currency|could not confirm|assumed/i);
+});
+
+test('a currency that reads cleanly raises no unverified signal', () => {
+  const rows = [row({ receiptFile: 'r.pdf', currency: 'USD' })];
+  const extractions = new Map([['T1', ext({ currency: 'USD' })]]);
+  const [r] = auditAll(rows, extractions, DEFAULT_POLICY);
+  assert.ok(!codes(r).includes('CURRENCY_UNVERIFIED'), 'no noise when the read was clean');
+  assert.ok(!codes(r).includes('CURRENCY_MISMATCH'));
+});
+
+test('a real currency mismatch still outranks the unverified signal', () => {
+  const rows = [row({ receiptFile: 'r.pdf', currency: 'USD' })];
+  const extractions = new Map([['T1', ext({ currency: 'EUR' })]]);
+  const [r] = auditAll(rows, extractions, DEFAULT_POLICY);
+  assert.ok(codes(r).includes('CURRENCY_MISMATCH'));
+  assert.ok(!codes(r).includes('CURRENCY_UNVERIFIED'),
+    'a known mismatch is not an unverified one');
+});
+
 test('policy thresholds are configurable, not hardcoded', async () => {
   const rows = [{
     txnId: 'T1', employee: 'A', date: '2026-07-02', vendor: 'Bluebird Diner',

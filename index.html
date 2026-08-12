@@ -123,6 +123,12 @@
       </label>
     </div>
 
+    <!-- Outside the label on purpose: a button inside it would re-open the
+         file picker on every click. -->
+    <p class="dropaside">
+      <button type="button" class="btn quiet small" id="btnClearReceipts" hidden>Clear receipts</button>
+    </p>
+
     <div class="actions">
       <button class="btn primary" id="btnRun" disabled>Run the audit</button>
       <button class="btn" id="btnSample">Try it with sample data</button>

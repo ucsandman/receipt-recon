@@ -322,6 +322,8 @@ h1 {
 /* ---------- policy ---------- */
 .policygrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--s-3) var(--s-6); }
 .policy-item { display: flex; flex-direction: column; gap: var(--s-1); }
+.policy-item.wide { grid-column: 1 / -1; }
+.policy-hint { font-size: var(--t-xs); color: var(--ink-3); }
 .policy-item label { font-size: var(--t-sm); color: var(--ink-2); }
 .policy-item input {
   font: inherit; font-size: var(--t-md); font-family: var(--mono);
@@ -489,6 +491,16 @@ td.mono { font-family: var(--mono); font-size: var(--t-sm); white-space: nowrap;
 .compare tr:last-child td { border-bottom: none; }
 
 .pdfview canvas { width: 100%; height: auto; border: 1px solid var(--line); border-radius: var(--r-md); display: block; }
+.pdfnav {
+  display: flex; align-items: center; gap: var(--s-2);
+  margin-bottom: var(--s-2); flex-wrap: wrap;
+}
+.pdfnav-label {
+  font-family: var(--mono); font-size: var(--t-xs); color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+.btn.small { padding: 4px 10px; font-size: var(--t-xs); }
+.dropaside { margin-top: var(--s-2); display: flex; justify-content: flex-end; }
 .rawtext summary { cursor: pointer; font-size: var(--t-sm); color: var(--ink-2); }
 .rawtext summary:hover { color: var(--ink); }
 .rawtext pre {

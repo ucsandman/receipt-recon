@@ -179,3 +179,97 @@ an unreadable page on the exact machine this tool was built for.
 with no `'unsafe-inline'`, and a hand-maintained hash would rot on every edit.
 It has to run before first paint, and `app/main.js` cannot, because modules
 defer.
+
+---
+
+## Mileage and per-diem are exempt from the receipt requirement, by policy
+
+**Date:** 2026-08-12
+
+**Decision.** Add `policy.noReceiptCategories` and route matching rows into their
+own `CATEGORY_EXEMPT_NO_RECEIPT` branch, rather than reusing the under-floor one.
+The list is editable in the policy panel and printed into the Methodology tab.
+
+**Why.** The Methodology tab already told the reader that mileage and per-diem
+have no support document by nature, but the engine did not know it, so every such
+row at or above the $75 floor produced a guaranteed hard `MISSING_RECEIPT`, every
+month, on every row. Reusing the under-floor branch was rejected because its
+message reads "under the 75.00 floor", which is simply false on a $200 mileage
+claim, and a finding that states a false reason is worse than no finding.
+
+**Alternatives rejected.** Hardcoding the category names, which would have made
+the suppression invisible to the reviewer. Any suppression an auditor cannot see
+and cannot switch off is a liability, so the list is both configurable and
+disclosed in the workbook. Emptying it restores the old behaviour exactly.
+
+---
+
+## An unreadable currency is reported, not ignored
+
+**Date:** 2026-08-12
+
+**Decision.** Widen the currency code list from 12 to 49, require a parsed code
+to sit adjacent to a number, and emit a soft `CURRENCY_UNVERIFIED` when no
+currency could be read off a receipt whose amount was still compared.
+
+**Why.** `CURRENCY_MISMATCH` was gated on a successfully parsed currency, so an
+SGD or ZAR receipt raised no currency finding at all while the amount check
+immediately above it compared the claimed number against the receipt total as if
+they were the same unit. Silence read as agreement.
+
+**Alternatives rejected.** Matching a bare currency code anywhere in the text.
+With 49 codes that lets "PLEASE TRY OUR APP" book a row as Turkish lira, so a
+code now only counts when it is adjacent to a digit, which is how a currency
+actually appears on a receipt. Making the finding hard was also rejected: an
+unverified assumption is a signal, not a proven violation, and hard findings are
+what an auditor must clear before sign-off.
+
+---
+
+## One bad receipt costs one row, never the run
+
+**Date:** 2026-08-12
+
+**Decision.** Wrap each row's body in its own try/catch in `runAudit`, recording
+the same `{tier:'failed'}` shape the file-not-found branch already writes.
+Replace `Math.max(...all)` in `parseTotal` with a reduce.
+
+**Why.** All 350 rows sat inside one try whose catch never assigned
+`state.results`, so a single throw discarded every row already processed,
+including minutes of OCR, with no partial output and no way to identify the
+offending file. `parseFields` also ran outside `extractReceipt`'s only try, and
+its `Math.max` spread overflows the argument stack at about 150,000 matches, so a
+receipt carrying that many money figures took down the whole run. The fix writes
+no new vocabulary: `rules.js` already converts that shape into a hard
+`UNREADABLE_RECEIPT` naming the row.
+
+**Related.** `clampScale` bounds both render sites to 40 million pixels. A PDF
+may declare a 14400pt page box, which at the fixed 3.0x OCR scale is about 7.5 GB
+of backing store. The dangerous outcome was never the crash: it was a blank
+canvas that OCR reads as nothing and the parser then reports as "no monetary
+amount found", which looks like a real result. When the clamp fires it pushes a
+warning that surfaces as a visible soft finding.
+
+---
+
+## Spreadsheet intake lives in its own module so it can be tested
+
+**Date:** 2026-08-12
+
+**Decision.** Move `mapHeaders`, `normalizeDate`, `excelSerialToISO` and
+`toNumber` out of `app/main.js` into `app/sheet.js`, unchanged, as a separate
+commit before any behaviour changed.
+
+**Why.** These roughly forty lines decide the fate of every row in the report and
+had no unit coverage, not through neglect but because `main.js` imports
+`pdf.min.mjs` and calls `init()` at load, so no node test could reach them. That
+is how `normalizeDate` kept a `new Date(s)` fallback that resolved a spelled-out
+date in local time: `"July 2, 2026"` returned `2026-07-01` in UTC+14 and
+`2026-07-02` in UTC-11, and `row.date` is hashed material, so the reproducible
+run hash depended on the machine it ran on.
+
+**Related.** The replacement parses every accepted format by hand and returns
+null for anything else, so an unrecognised date is reported missing rather than
+silently off by one. `tests/sheet.test.mjs` opens with a control asserting that a
+runtime TZ change still moves the ambient parser, so the timezone tests underneath
+cannot pass vacuously if the platform stops honouring it.

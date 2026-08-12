@@ -186,6 +186,10 @@ export function buildWorkbook(XLSX, results, meta) {
     ['  No bank or card statement was compared', 'Only the expense report and its attached documents were examined. A charge could exist with no row at all and this report would not see it.'],
     ['  Business purpose was not judged', 'Whether a stated purpose is genuine is a human judgement and was not assessed.'],
     ['  Mileage and per-diem rows cannot be verified', 'These have no support document by nature. Only arithmetic plausibility can be checked.'],
+    ['  Categories exempted from the receipt requirement',
+      (policy.noReceiptCategories || []).length
+        ? `${policy.noReceiptCategories.join(', ')}. Rows in these categories were not asked for a receipt at any amount. They were still checked for date, place and business purpose.`
+        : 'None. Every row was held to the receipt requirement.'],
     ['  Vendor matching is a similarity score', 'Names are compared fuzzily. The score and threshold are recorded on each finding so a reviewer can second-guess it.'],
     ['  Nothing was auto-cleared', 'Every exception needs a human decision. A blank reviewer column means the item is still open.'],
     [],
