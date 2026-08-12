@@ -7,6 +7,8 @@ on separate and deliberately conflicting lenses.
 
 > Receipt Recon's two headline guarantees, a deterministic run hash and a fully offline read, are both asserted more broadly than the code enforces them, and the single cheapest fix on the board (per-row fault isolation) is the difference between a 350-file run finishing and being thrown away by one bad PDF.
 
+**Status.** All eight ship-now items landed on 2026-08-12 in commit ec9db7a, each with the check its entry asked for. Test suites went from 19 unit, 14 browser and 17 accessibility assertions to 37, 15 and 22.
+
 | | Count |
 | --- | --- |
 | Ship now | 8 |
