@@ -1,6 +1,6 @@
 {
   "name": "receipt-recon",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Dev-only harness for running the test suite. The app itself has no build step and no runtime dependencies.",

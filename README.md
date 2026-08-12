@@ -143,6 +143,20 @@ python tools/make_sample_data.py --count 350
 Roughly a minute for 350 transactions when most have a text layer, longer if many
 need OCR.
 
+## Keyboard, screen readers, and contrast
+
+The whole task works without a mouse. Tab reaches both file pickers, the
+transaction id in each row is a real button that opens the evidence drawer on
+Enter, and Escape closes the drawer and puts focus back on the row you came
+from. Progress is announced at milestones instead of on every row, so a 350-row
+run does not read out 350 updates.
+
+Every finding states its severity in words next to the colour, so the exception
+tiers survive colour blindness and a black-and-white print of the workbook. Text
+meets WCAG 2.2 AA in both the light and dark themes, checked against the rendered
+page rather than the palette. Theme follows your system and can be pinned to
+light or dark from the top bar.
+
 ## Honest limits
 
 Read these before relying on it.
@@ -166,11 +180,24 @@ npm run sample       # regenerate the sample data (needs Python + reportlab, ope
 npm test             # 19 unit and integration tests
 npm run serve        # http://localhost:8080
 node tools/browser-check.mjs   # drives the real page in a real browser
+node tools/a11y-check.mjs      # keyboard, focus, contrast, sorting, theming
 ```
 
-The browser check is the one that matters. It runs the full audit in Chromium,
-asserts the findings against the answer key, exercises the OCR tier, downloads the
-workbook, and **fails if the page makes a single external network request**.
+The two browser checks are the ones that matter, and they answer different
+questions. `browser-check.mjs` asks whether the audit is **correct**: it runs the
+full audit in Chromium, asserts the findings against the answer key, exercises
+the OCR tier, downloads the workbook, and **fails if the page makes a single
+external network request**.
+
+`a11y-check.mjs` asks whether the audit is **usable**. Seventeen assertions, each
+one mapped to a defect that shipped in the first version: both file pickers
+reachable by Tab, focus moving into the evidence drawer and back out to the row
+that opened it, the table header actually sticking, sort order including the
+blanks-last rule, theme persistence across a reload, severity stated in words
+rather than colour alone, and **every rendered text node measured against WCAG AA
+in both themes**. The contrast check is measured on the painted page, not
+calculated from the tokens, so inherited colours and tinted parents cannot hide a
+failure.
 
 Everything in `vendor/` is committed on purpose. There is no build step and no CDN,
 because a tool that stops working when a CDN is blocked is no use on a corporate

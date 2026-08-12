@@ -107,3 +107,75 @@ PDF actually appears, which never happens on sets that are all digital receipts.
 **Gotcha found the hard way.** `corePath` must point at one specific tesseract core
 file, not at the directory. Given a directory, tesseract.js probes for whichever
 variant the browser supports and requested a relaxed-SIMD build that was not shipped.
+
+---
+
+## Keyboard operability is a correctness requirement, not a nicety
+
+**Date:** 2026-08-12
+
+**Decision.** Every task the mouse can do is reachable and operable from the
+keyboard, and `tools/a11y-check.mjs` fails the build if that stops being true.
+
+**Why.** The first version was unusable without a mouse in the two places that
+matter most. Both file inputs carried the `hidden` attribute, which resolves to
+`display: none` and removes an element from the tab order, so a keyboard user
+could not load a spreadsheet at all. Result rows were `<tr>` elements with a
+click listener and no tabindex, so the evidence drawer could not be opened
+either. Nothing surfaced this: the page looked finished and every test passed.
+
+**How the row handle was resolved.** Putting `tabindex="0"` and `role="button"`
+on the `<tr>` was rejected: it trades away row semantics, and a screen reader
+then announces a button where a table row is. Instead the transaction id cell
+holds a real `<button>`. Mouse users still click anywhere on the row, the click
+is delegated once on `<tbody>`, and both paths run the same code, so they cannot
+drift apart.
+
+**Consequence.** The evidence panel is a drawer, not a modal, and is not focus
+trapped. It exists to be read *against* the row behind it, so trapping focus or
+setting `aria-modal` would fight the actual task. Focus moves in on open and
+returns to the originating row on Escape, but a click elsewhere dismisses it
+without pulling focus backwards.
+
+---
+
+## Contrast is verified against the rendered page, not the palette
+
+**Date:** 2026-08-12
+
+**Decision.** The AA check walks every text node in a real browser, resolves the
+effective background by climbing ancestors, and compares that. It runs in both
+themes.
+
+**Why.** The muted ink rung was originally tuned by eye against the page
+background, where it reached 3.75:1, and then used on the table header and other
+`--surface-2` wells where it fell to 3.50:1. Arithmetic on the token list would
+have cleared it, because the token list does not know which surfaces a colour
+actually lands on. Every ink rung is now set against the *darkest* surface it
+appears on.
+
+**Guard.** Reverting the token to its old value fails the check, which is how the
+check was confirmed to have teeth rather than being decorative.
+
+---
+
+## The dark palette is duplicated on purpose
+
+**Date:** 2026-08-12
+
+**Decision.** Write the dark tokens twice, once under
+`@media (prefers-color-scheme: dark)` and once under `:root[data-theme="dark"]`,
+instead of collapsing both into `light-dark()`.
+
+**Why.** `light-dark()` would state the palette once and is the cleaner code, but
+it needs Chrome 123 or later. The product exists to work on the locked-down
+corporate laptop that is several years behind, and the failure mode is not
+graceful: unsupported colour functions resolve to invalid, which strips the
+palette rather than falling back to it. Twenty duplicated lines are cheaper than
+an unreadable page on the exact machine this tool was built for.
+
+**Related.** The theme bootstrap is `app/theme-boot.js` rather than an inline
+`<script>` for the same class of reason: the page's CSP is `script-src 'self'`
+with no `'unsafe-inline'`, and a hand-maintained hash would rot on every edit.
+It has to run before first paint, and `app/main.js` cannot, because modules
+defer.

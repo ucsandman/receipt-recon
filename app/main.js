@@ -13,6 +13,7 @@ import { buildWorkbook, downloadWorkbook, runHash } from './report.js';
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
 
 const $ = (id) => document.getElementById(id);
+const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
 const state = {
   sheetFile: null,
@@ -21,6 +22,10 @@ const state = {
   results: [],
   policy: structuredClone(DEFAULT_POLICY),
   filter: 'all',
+  sort: { key: null, dir: 1 },
+  selectedTxn: null,
+  lastTrigger: null,     // element focus returns to when the panel closes
+  panelToken: 0,         // guards against a slow PDF render landing in a newer panel
   ocrWorker: null,
   ocrUsed: 0,
   reportName: '',
@@ -181,10 +186,16 @@ async function readSheet(file) {
 // --------------------------------------------------------------------------
 
 function setProgress(pct, text) {
-  $('progBar').style.width = `${Math.max(0, Math.min(100, pct))}%`;
+  const v = Math.max(0, Math.min(100, pct));
+  $('progBar').style.width = `${v}%`;
+  $('progBar').parentElement.setAttribute('aria-valuenow', String(Math.round(v)));
   if (text) setProgressText(text);
 }
 function setProgressText(text) { $('progText').textContent = text; }
+
+/** Screen-reader announcements. Deliberately not wired to every row: a 350-row
+ *  run would otherwise queue 350 utterances. Milestones only. */
+function announce(msg) { $('srStatus').textContent = msg; }
 
 /** Receipt filenames in the sheet rarely match the folder exactly: extra
  *  paths, different case, a missing .pdf. Resolve generously, then fall back
@@ -204,55 +215,93 @@ async function runAudit() {
   $('step-progress').hidden = false;
   $('step-results').hidden = true;
   $('btnRun').disabled = true;
+  $('btnRun').setAttribute('aria-busy', 'true');
   state.ocrUsed = 0;
 
-  const extractions = new Map();
-  const total = state.rows.length;
-  let done = 0;
+  // Whatever happens below, the Run button comes back. Without this, a single
+  // unreadable file left the button disabled and the progress bar frozen, with
+  // no way back other than reloading the page.
+  try {
+    const extractions = new Map();
+    const total = state.rows.length;
+    let done = 0;
+    let announcedAt = 0;
 
-  for (const row of state.rows) {
-    const file = resolveReceipt(row);
-    // The sheet claims a receipt but the folder has no such file. That is a
-    // real finding, so record the intent and let the rules engine report it.
-    if (!file) {
-      if (row.receiptFile) {
-        extractions.set(row.txnId, {
-          tier: 'failed', confidence: 0, text: '', fields: { warnings: [] },
-          error: `File "${row.receiptFile}" was not found among the receipts you loaded.`,
-        });
+    for (const row of state.rows) {
+      const file = resolveReceipt(row);
+      // The sheet claims a receipt but the folder has no such file. That is a
+      // real finding, so record the intent and let the rules engine report it.
+      if (!file) {
+        if (row.receiptFile) {
+          extractions.set(row.txnId, {
+            tier: 'failed', confidence: 0, text: '', fields: { warnings: [] },
+            error: `File "${row.receiptFile}" was not found among the receipts you loaded.`,
+          });
+        }
+        done++;
+        setProgress((done / total) * 100, `${done} of ${total} rows`);
+        continue;
       }
+
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const res = await extractReceipt(bytes, { pdfjsLib, getOcrWorker });
+      if (res.tier === 'ocr') state.ocrUsed++;
+      extractions.set(row.txnId, res);
+
       done++;
-      setProgress((done / total) * 100, `${done} of ${total} rows`);
-      continue;
+      const pct = (done / total) * 100;
+      setProgress(pct, `${done} of ${total} rows${state.ocrUsed ? ` · ${state.ocrUsed} needed OCR` : ''}`);
+      if (pct - announcedAt >= 25) {
+        announcedAt = pct;
+        announce(`${done} of ${total} receipts read.`);
+      }
+      // Yield so the progress bar actually paints during a long run.
+      if (done % 3 === 0) await new Promise((r) => setTimeout(r, 0));
     }
 
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    const res = await extractReceipt(bytes, { pdfjsLib, getOcrWorker });
-    if (res.tier === 'ocr') state.ocrUsed++;
-    extractions.set(row.txnId, res);
+    state.results = auditAll(state.rows, extractions, state.policy);
+    state.selectedTxn = null;
+    setProgress(100, `Done. ${total} rows checked.`);
+    renderResults();
+    $('step-results').hidden = false;
 
-    done++;
-    setProgress((done / total) * 100,
-      `${done} of ${total} rows${state.ocrUsed ? ` · ${state.ocrUsed} needed OCR` : ''}`);
-    // Yield so the progress bar actually paints during a long run.
-    if (done % 3 === 0) await new Promise((r) => setTimeout(r, 0));
+    const bad = state.results.filter((x) => x.status !== 'clean').length;
+    announce(`Audit finished. ${total} rows checked, ${bad} need attention.`);
+    $('step-results').scrollIntoView({
+      behavior: reduceMotion.matches ? 'auto' : 'smooth',
+      block: 'start',
+    });
+  } catch (err) {
+    setProgressText('The audit stopped before it finished.');
+    showBanner(`The audit stopped: ${err.message}`);
+    announce('The audit stopped before it finished.');
+  } finally {
+    $('btnRun').removeAttribute('aria-busy');
+    updateRunButton();
   }
-
-  state.extractions = extractions;
-  state.results = auditAll(state.rows, extractions, state.policy);
-  setProgress(100, `Done. ${total} rows checked.`);
-  renderResults();
-  $('step-results').hidden = false;
-  $('btnRun').disabled = false;
-  $('step-results').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 // --------------------------------------------------------------------------
 // Rendering
 // --------------------------------------------------------------------------
 
-const money = (v, cur) => (v == null || v === '' ? '—'
-  : `${cur === 'EUR' ? '€' : cur === 'GBP' ? '£' : '$'}${Number(v).toFixed(2)}`);
+// Cached per currency: building an Intl formatter is not free, and this runs
+// once per cell on a 350-row table.
+const formatters = new Map();
+function money(v, cur) {
+  if (v == null || v === '') return '—';
+  const code = String(cur || 'USD').toUpperCase();
+  if (!formatters.has(code)) {
+    let fmt;
+    try {
+      fmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: code });
+    } catch {
+      fmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
+    }
+    formatters.set(code, fmt);
+  }
+  return formatters.get(code).format(Number(v));
+}
 
 function renderResults() {
   const r = state.results;
@@ -271,10 +320,70 @@ function renderResults() {
   renderRows();
 }
 
+// Sort accessors. Anything blank sorts last in BOTH directions: a missing
+// amount is not "the smallest amount", and burying real rows under blanks on
+// a descending sort is exactly the wrong thing for an auditor scanning.
+const SORT_KEYS = {
+  txn:      (r) => r.row.txnId,
+  date:     (r) => r.row.date,
+  vendor:   (r) => r.row.vendor,
+  category: (r) => r.row.category,
+  claimed:  (r) => r.row.amount,
+  receipt:  (r) => r.extraction?.fields?.total,
+  readby:   (r) => (!r.extraction ? 4 : ({ text: 0, ocr: 1, failed: 2 })[r.extraction.tier] ?? 3),
+  status:   (r) => ({ exception: 0, 'needs-review': 1, clean: 2 })[r.status] ?? 3,
+};
+
+function compareBy(key, dir) {
+  const get = SORT_KEYS[key];
+  return (a, b) => {
+    const x = get(a), y = get(b);
+    const xBlank = x == null || x === '';
+    const yBlank = y == null || y === '';
+    if (xBlank || yBlank) return xBlank && yBlank ? 0 : xBlank ? 1 : -1;
+    if (typeof x === 'number' && typeof y === 'number') return (x - y) * dir;
+    return String(x).localeCompare(String(y), 'en', { numeric: true, sensitivity: 'base' }) * dir;
+  };
+}
+
+// Unsorted -> ascending -> descending -> unsorted. The third state matters
+// here: unsorted is the order the report was submitted in, which is itself
+// information an auditor wants to get back to.
+function toggleSort(key) {
+  const s = state.sort;
+  if (s.key !== key) { s.key = key; s.dir = 1; }
+  else if (s.dir === 1) { s.dir = -1; }
+  else { s.key = null; s.dir = 1; }
+  renderRows();
+}
+
+function paintSortHeaders() {
+  for (const btn of document.querySelectorAll('.th-sort')) {
+    const th = btn.closest('th');
+    const ind = btn.querySelector('.sort-ind');
+    if (state.sort.key === btn.dataset.sort) {
+      th.setAttribute('aria-sort', state.sort.dir === 1 ? 'ascending' : 'descending');
+      ind.textContent = state.sort.dir === 1 ? '↑' : '↓';
+    } else {
+      th.removeAttribute('aria-sort');
+      ind.textContent = '↕';
+    }
+  }
+}
+
+const EMPTY_COPY = {
+  all: 'No rows to show yet. Load an expense report, then run the audit.',
+  exception: 'No exceptions. Every row matched its receipt and cleared policy.',
+  'needs-review': 'Nothing needs review. No soft signals were raised on this run.',
+  clean: 'No clean rows. Every transaction raised at least one finding.',
+};
+
 function renderRows() {
-  const rows = state.filter === 'all'
+  let rows = state.filter === 'all'
     ? state.results
     : state.results.filter((r) => r.status === state.filter);
+
+  if (state.sort.key) rows = [...rows].sort(compareBy(state.sort.key, state.sort.dir));
 
   $('resultBody').innerHTML = rows.map((r) => {
     const f = r.extraction?.fields || {};
@@ -283,22 +392,23 @@ function renderRows() {
       : r.extraction.tier === 'ocr' ? `OCR ${Math.round(r.extraction.confidence)}%`
       : 'unreadable';
     const findings = r.findings.filter((x) => x.severity !== 'info');
-    return `<tr data-txn="${r.row.txnId}">
-      <td class="mono">${esc(r.row.txnId)}</td>
+    const label = r.status === 'needs-review' ? 'Review' : r.status === 'exception' ? 'Exception' : 'Clean';
+    const sel = r.row.txnId === state.selectedTxn ? ' class="selected"' : '';
+    return `<tr data-txn="${esc(r.row.txnId)}"${sel}>
+      <td class="mono"><button type="button" class="rowbtn">${esc(r.row.txnId)}</button></td>
       <td class="mono">${esc(r.row.date ?? '—')}</td>
       <td>${esc(r.row.vendor)}</td>
       <td>${esc(r.row.category)}</td>
       <td class="right">${money(r.row.amount, r.row.currency)}</td>
       <td class="right">${money(f.total, f.currency || r.row.currency)}</td>
       <td class="mono">${readBy}</td>
-      <td><span class="pill ${r.status}">${r.status === 'needs-review' ? 'Review' : r.status === 'exception' ? 'Exception' : 'Clean'}</span></td>
+      <td><span class="pill ${r.status}">${label}</span></td>
       <td><ul class="findlist">${findings.map((x) => `<li><code>${x.code}</code></li>`).join('') || '<li>—</li>'}</ul></td>
     </tr>`;
-  }).join('') || '<tr><td colspan="9" style="padding:22px;text-align:center;color:var(--ink-3)">Nothing in this view.</td></tr>';
+  }).join('') ||
+    `<tr class="empty-row"><td colspan="9">${esc(EMPTY_COPY[state.filter] ?? EMPTY_COPY.all)}</td></tr>`;
 
-  for (const tr of $('resultBody').querySelectorAll('tr[data-txn]')) {
-    tr.addEventListener('click', () => openPanel(tr.dataset.txn, tr));
-  }
+  paintSortHeaders();
 }
 
 function esc(s) {
@@ -311,13 +421,22 @@ async function openPanel(txnId, tr) {
   if (!r) return;
   for (const el of $('resultBody').querySelectorAll('tr.selected')) el.classList.remove('selected');
   tr?.classList.add('selected');
+  state.selectedTxn = txnId;
+  state.lastTrigger = tr?.querySelector('.rowbtn') ?? tr ?? null;
 
   $('panelTitle').textContent = `${r.row.txnId} · ${r.row.vendor || 'receipt'}`;
   const findings = r.findings.filter((x) => x.severity !== 'info');
+  // Severity is written out, not just coloured, so the tier survives colour
+  // blindness and a black-and-white print.
   $('panelFindings').innerHTML = findings.length
-    ? findings.map((f) => `<div class="finding ${f.severity}">
-        <span class="code">${f.code}</span>${esc(f.message)}</div>`).join('')
-    : '<div class="finding">No findings. Every check passed on this row.</div>';
+    ? findings.map((f) => `<div class="finding ${esc(f.severity)}">
+        <div class="finding-head">
+          <span class="code">${esc(f.code)}</span>
+          <span class="finding-sev">${f.severity === 'hard' ? 'Exception' : 'Needs review'}</span>
+        </div>
+        <p class="finding-msg">${esc(f.message)}</p>
+      </div>`).join('')
+    : '<div class="finding"><p class="finding-msg">No findings. Every check passed on this row.</p></div>';
 
   const f = r.extraction?.fields || {};
   const line = (label, sheet, receipt) => {
@@ -326,38 +445,54 @@ async function openPanel(txnId, tr) {
     return `<tr class="${differs ? 'differs' : ''}"><td>${label}</td><td>${esc(sheet ?? '—')}</td><td>${esc(receipt ?? '—')}</td></tr>`;
   };
   $('panelCompare').innerHTML =
-    `<tr><td></td><td style="color:var(--ink-3)">report says</td><td style="color:var(--ink-3)">receipt says</td></tr>` +
+    `<thead><tr><th><span class="sr-only">Field</span></th><th>Report says</th><th>Receipt says</th></tr></thead><tbody>` +
     line('Amount', r.row.amount?.toFixed(2), f.total?.toFixed(2)) +
     line('Date', r.row.date, f.date) +
     line('Vendor', r.row.vendor, f.vendor) +
-    line('Currency', r.row.currency, f.currency);
+    line('Currency', r.row.currency, f.currency) +
+    `</tbody>`;
 
   $('panelRaw').textContent = r.extraction?.text?.trim() || 'Nothing was read from this file.';
 
-  // Render the actual receipt, so the auditor sees the document, not a claim
-  // about the document.
+  // Show the panel before rendering the PDF. The render can take a second on a
+  // big scan, and making the whole drawer wait on it reads as a broken click.
   const holder = $('panelPdf');
-  holder.innerHTML = '';
-  const file = resolveReceipt(r.row);
-  if (file) {
-    try {
-      const task = pdfjsLib.getDocument({ data: new Uint8Array(await file.arrayBuffer()) });
-      const doc = await task.promise;
-      const page = await doc.getPage(1);
-      const viewport = page.getViewport({ scale: 1.5 });
-      const canvas = document.createElement('canvas');
-      canvas.width = viewport.width; canvas.height = viewport.height;
-      await page.render({ canvasContext: canvas.getContext('2d'), viewport, canvas }).promise;
-      holder.appendChild(canvas);
-      await task.destroy();
-    } catch {
-      holder.innerHTML = '<p class="microcopy">This receipt could not be displayed.</p>';
-    }
-  } else {
-    holder.innerHTML = '<p class="microcopy">No support document was loaded for this row.</p>';
-  }
-
+  holder.innerHTML = '<p class="microcopy">Rendering the receipt…</p>';
   $('panel').hidden = false;
+  $('panel').focus();
+
+  // Clicking a second row while the first is still rendering must not append
+  // that first canvas into the second row's panel.
+  const token = ++state.panelToken;
+  const file = resolveReceipt(r.row);
+  if (!file) {
+    holder.innerHTML = '<p class="microcopy">No support document was loaded for this row.</p>';
+    return;
+  }
+  try {
+    const task = pdfjsLib.getDocument({ data: new Uint8Array(await file.arrayBuffer()) });
+    const doc = await task.promise;
+    const page = await doc.getPage(1);
+    const viewport = page.getViewport({ scale: 1.5 });
+    const canvas = document.createElement('canvas');
+    canvas.width = viewport.width; canvas.height = viewport.height;
+    await page.render({ canvasContext: canvas.getContext('2d'), viewport, canvas }).promise;
+    await task.destroy();
+    if (token !== state.panelToken) return;
+    holder.replaceChildren(canvas);
+  } catch {
+    if (token !== state.panelToken) return;
+    holder.innerHTML = '<p class="microcopy">This receipt could not be displayed.</p>';
+  }
+}
+
+function closePanel({ restoreFocus = true } = {}) {
+  const panel = $('panel');
+  if (panel.hidden) return;
+  panel.hidden = true;
+  state.panelToken++;
+  if (restoreFocus) state.lastTrigger?.focus();
+  state.lastTrigger = null;
 }
 
 // --------------------------------------------------------------------------
@@ -441,7 +576,10 @@ function acceptReceipts(files) {
 function showBanner(msg) {
   clearBanner();
   const el = document.createElement('div');
-  el.className = 'banner'; el.id = 'banner'; el.textContent = msg;
+  el.className = 'banner';
+  el.id = 'banner';
+  el.setAttribute('role', 'alert');   // otherwise the error is silent to a screen reader
+  el.textContent = msg;
   $('step-input').appendChild(el);
 }
 function clearBanner() { $('banner')?.remove(); }
@@ -461,13 +599,40 @@ function wireDrop(dropId, handler) {
 }
 
 // --------------------------------------------------------------------------
+// Theme. The stylesheet carries both palettes; this decides which one applies
+// and remembers it. app/theme-boot.js replays the choice before first paint.
+// --------------------------------------------------------------------------
+
+const THEME_KEY = 'receipt-recon-theme';
+
+function applyTheme(value) {
+  const root = document.documentElement;
+  if (value === 'system') root.removeAttribute('data-theme');
+  else root.setAttribute('data-theme', value);
+  for (const b of document.querySelectorAll('.themebtn')) {
+    b.setAttribute('aria-pressed', String(b.dataset.themeValue === value));
+  }
+  try { localStorage.setItem(THEME_KEY, value); } catch { /* storage blocked by policy */ }
+}
+
+function storedTheme() {
+  try {
+    const v = localStorage.getItem(THEME_KEY);
+    if (v === 'light' || v === 'dark' || v === 'system') return v;
+  } catch { /* storage blocked by policy */ }
+  return 'system';
+}
+
+// --------------------------------------------------------------------------
 // Sample data. One click, no files needed. This is what makes the tool
 // evaluable by a stranger in ten seconds.
 // --------------------------------------------------------------------------
 
 async function loadSample() {
-  $('btnSample').disabled = true;
-  $('btnSample').textContent = 'Loading sample…';
+  const btn = $('btnSample');
+  btn.disabled = true;
+  btn.setAttribute('aria-busy', 'true');
+  btn.textContent = 'Loading sample…';
   try {
     const manifest = await fetch('sample-data/manifest.json').then((r) => {
       if (!r.ok) throw new Error('Sample data is not available on this copy.');
@@ -487,14 +652,20 @@ async function loadSample() {
   } catch (err) {
     showBanner(err.message);
   } finally {
-    $('btnSample').disabled = false;
-    $('btnSample').textContent = 'Try it with sample data';
+    btn.disabled = false;
+    btn.removeAttribute('aria-busy');
+    btn.textContent = 'Try it with sample data';
   }
 }
 
 // --------------------------------------------------------------------------
 
 function init() {
+  applyTheme(storedTheme());
+  for (const b of document.querySelectorAll('.themebtn')) {
+    b.addEventListener('click', () => applyTheme(b.dataset.themeValue));
+  }
+
   $('fileSheet').addEventListener('change', (e) => e.target.files[0] && acceptSheet(e.target.files[0]));
   $('fileReceipts').addEventListener('change', (e) => acceptReceipts([...e.target.files]));
   wireDrop('dropSheet', (files) => acceptSheet(files[0]));
@@ -516,29 +687,68 @@ function init() {
 
   for (const chip of $('filters').querySelectorAll('.chip')) {
     chip.addEventListener('click', () => {
-      for (const c of $('filters').querySelectorAll('.chip')) c.classList.remove('active');
+      for (const c of $('filters').querySelectorAll('.chip')) {
+        c.classList.remove('active');
+        c.setAttribute('aria-pressed', 'false');
+      }
       chip.classList.add('active');
+      chip.setAttribute('aria-pressed', 'true');
       state.filter = chip.dataset.filter;
       renderRows();
     });
   }
 
-  $('btnDownload').addEventListener('click', async () => {
-    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
-    const hash = await runHash(state.results, state.policy);
-    const wb = buildWorkbook(XLSX, state.results, {
-      hash,
-      policy: state.policy,
-      generatedAt: new Date().toISOString().slice(0, 19).replace('T', ' '),
-      reportName: state.reportName,
-      receiptCount: state.receipts.size,
-      ocrCount: state.ocrUsed,
-    });
-    downloadWorkbook(XLSX, wb, `audit-${stamp}.xlsx`);
+  for (const btn of document.querySelectorAll('.th-sort')) {
+    btn.addEventListener('click', () => toggleSort(btn.dataset.sort));
+  }
+
+  // Delegated: rows are replaced on every filter and sort, and rebinding a
+  // listener per row on a 350-row table is work for nothing. This also means
+  // the transaction-id button and a click anywhere else on the row share one
+  // path, so keyboard and mouse cannot drift apart.
+  $('resultBody').addEventListener('click', (e) => {
+    const tr = e.target.closest('tr[data-txn]');
+    if (tr) openPanel(tr.dataset.txn, tr);
   });
 
-  $('panelClose').addEventListener('click', () => { $('panel').hidden = true; });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') $('panel').hidden = true; });
+  $('btnDownload').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
+    btn.textContent = 'Building workbook…';
+    try {
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+      const hash = await runHash(state.results, state.policy);
+      const wb = buildWorkbook(XLSX, state.results, {
+        hash,
+        policy: state.policy,
+        generatedAt: new Date().toISOString().slice(0, 19).replace('T', ' '),
+        reportName: state.reportName,
+        receiptCount: state.receipts.size,
+        ocrCount: state.ocrUsed,
+      });
+      downloadWorkbook(XLSX, wb, `audit-${stamp}.xlsx`);
+      announce('Audit workbook downloaded.');
+    } catch (err) {
+      showBanner(`The workbook could not be built: ${err.message}`);
+    } finally {
+      btn.disabled = false;
+      btn.removeAttribute('aria-busy');
+      btn.textContent = label;
+    }
+  });
+
+  $('panelClose').addEventListener('click', () => closePanel());
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closePanel(); });
+
+  // Click away to dismiss, the way a drawer should. Focus is not pulled back to
+  // the row here: the pointer is already on its way somewhere else.
+  document.addEventListener('pointerdown', (e) => {
+    if ($('panel').hidden) return;
+    if (e.target.closest('#panel') || e.target.closest('#resultBody tr[data-txn]')) return;
+    closePanel({ restoreFocus: false });
+  });
 }
 
 init();
