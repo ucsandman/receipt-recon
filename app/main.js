@@ -10,6 +10,7 @@ import { extractReceipt, extractReceiptImage, clampScale, IMAGE_EXTENSIONS } fro
 import { mapHeaders, normalizeDate, toNumber, pickTransactionSheet } from './sheet.js';
 import { auditAll, sanitizePolicy, DEFAULT_POLICY } from './rules.js';
 import { parseBudgetSheet, pickBudgetSheet, reconcileBudget, fxView } from './budget.js';
+import { parseStatement, pickStatementSheet, reconcileStatement } from './statement.js';
 import { buildWorkbook, downloadWorkbook, runHash, sumsByCurrency } from './report.js';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
@@ -28,6 +29,9 @@ const state = {
   budgetSheetIndex: -1,  // -1 means no budget sheet in play
   budgetEntries: null,
   budgetRecon: null,
+  stmtRows: null,        // parsed card-statement charges, or null
+  stmtInfo: null,        // { fileName, sheetName, skipped }
+  stmtRecon: null,       // reconcileStatement() output for the last run
   policy: structuredClone(DEFAULT_POLICY),
   filter: 'all',
   sort: { key: null, dir: 1 },
@@ -349,7 +353,12 @@ async function runAudit() {
       if (done % 3 === 0) await new Promise((r) => setTimeout(r, 0));
     }
 
-    state.results = auditAll(state.rows, extractions, state.policy);
+    // Statement findings must exist before auditAll so they drive row status.
+    state.stmtRecon = state.stmtRows?.length
+      ? reconcileStatement(state.rows, state.stmtRows, state.policy)
+      : null;
+    state.results = auditAll(state.rows, extractions, state.policy,
+      state.stmtRecon?.rowFindings ?? null);
     state.budgetRecon = state.budgetEntries
       ? reconcileBudget(state.rows, state.budgetEntries, state.policy)
       : null;
@@ -416,8 +425,31 @@ function renderResults() {
     <div class="tile"><div class="n${flagged.length > 1 ? ' n-multi' : ''}">${flaggedHtml}</div><div class="k">Value flagged</div></div>`;
 
   renderBudget();
+  renderStatement();
   renderRows();
   updateReviewProgress();
+}
+
+function renderStatement() {
+  const card = $('stmtCard');
+  if (!state.stmtRecon) { card.hidden = true; return; }
+  const { matchedCount, unclaimed, notOnStatement } = state.stmtRecon;
+  const bits = [`${matchedCount} charge${matchedCount === 1 ? '' : 's'} matched to expense rows`];
+  if (notOnStatement.length) {
+    bits.push(`${notOnStatement.length} expense row${notOnStatement.length === 1 ? '' : 's'} with no matching charge (flagged in the table below as CLAIMED_NOT_ON_STATEMENT)`);
+  }
+  if (!unclaimed.length) bits.push('every statement charge is accounted for');
+  $('stmtMeta').textContent = `From “${state.stmtInfo?.fileName ?? 'statement'}”. ${bits.join(' · ')}.`;
+
+  $('stmtBody').innerHTML = unclaimed.map((s) => `<tr>
+      <td class="mono">${s.line}</td>
+      <td class="mono">${esc(s.date)}</td>
+      <td>${esc(s.description || '(no description)')}</td>
+      <td class="right">${money(s.amount, s.currency || 'USD')}</td>
+      <td><span class="pill exception">Never expensed</span></td>
+    </tr>`).join('');
+  $('stmtTableWrap').hidden = unclaimed.length === 0;
+  card.hidden = false;
 }
 
 // Budget statuses map onto the row-status colours: over budget is an
@@ -631,7 +663,7 @@ function setDecision(key, decision) {
 
 async function saveReviewSession() {
   if (!state.results.length) { showBanner('Run an audit before saving a review session.'); return; }
-  const hash = await runHash(state.results, state.policy, state.budgetRecon);
+  const hash = await runHash(state.results, state.policy, state.budgetRecon, state.stmtRows);
   const decisions = [...state.reviews.entries()].map(([key, v]) => {
     const i = key.lastIndexOf('::');
     return { txnId: key.slice(0, i), code: key.slice(i + 2), ...v };
@@ -672,7 +704,7 @@ async function loadReviewSession(file) {
     else skipped++;
   }
   if (raw.reviewer && !$('reviewerName').value) $('reviewerName').value = raw.reviewer;
-  const currentHash = await runHash(state.results, state.policy, state.budgetRecon);
+  const currentHash = await runHash(state.results, state.policy, state.budgetRecon, state.stmtRows);
   const mismatch = raw.runHash && currentHash && raw.runHash !== currentHash;
   if (mismatch || skipped) {
     showBanner(`${applied} decision${applied === 1 ? '' : 's'} applied, ${skipped} did not match this run.` +
@@ -1207,6 +1239,40 @@ function clearReceipts() {
   announce('Receipts cleared.');
 }
 
+/** The optional third input: the card statement the user downloads themselves.
+ *  Local file only, by design — no bank API, no OAuth, no live connection. */
+async function acceptStatement(file) {
+  try {
+    const sheets = await readWorkbook(file);
+    const idx = pickStatementSheet(sheets);
+    if (idx === -1) {
+      throw new Error('No statement table found in that file. It needs a date column and an amount column.');
+    }
+    const parsed = parseStatement(sheets[idx].aoa);
+    state.stmtRows = parsed.rows;
+    state.stmtInfo = { fileName: file.name, sheetName: sheets[idx].name, skipped: parsed.skipped };
+    const bits = [`${file.name} · ${parsed.rows.length} charge${parsed.rows.length === 1 ? '' : 's'}`];
+    if (parsed.skipped) bits.push(`${parsed.skipped} payment line${parsed.skipped === 1 ? '' : 's'} skipped`);
+    $('statusStatement').textContent = bits.join(' · ');
+    $('dropStatement').classList.add('filled');
+    $('btnClearStatement').hidden = false;
+    clearBanner();
+  } catch (err) {
+    clearStatement();
+    $('statusStatement').textContent = 'Could not read that file';
+    showBanner(err.message);
+  }
+}
+
+function clearStatement() {
+  state.stmtRows = null;
+  state.stmtInfo = null;
+  state.stmtRecon = null;
+  $('statusStatement').textContent = 'None loaded';
+  $('dropStatement').classList.remove('filled');
+  $('btnClearStatement').hidden = true;
+}
+
 function showBanner(msg) {
   clearBanner();
   const el = document.createElement('div');
@@ -1318,6 +1384,9 @@ function init() {
   $('btnClearReceipts').addEventListener('click', clearReceipts);
   wireDrop('dropSheet', (files) => acceptSheet(files[0]));
   wireDrop('dropReceipts', (files) => acceptReceipts(files));
+  $('fileStatement').addEventListener('change', (e) => e.target.files[0] && acceptStatement(e.target.files[0]));
+  $('btnClearStatement').addEventListener('click', () => { clearStatement(); announce('Statement cleared.'); });
+  wireDrop('dropStatement', (files) => acceptStatement(files[0]));
 
   $('btnRun').addEventListener('click', runAudit);
   $('btnSample').addEventListener('click', loadSample);
@@ -1384,10 +1453,17 @@ function init() {
         // material and reconcileBudget's lines are untouched by it.
         fx: fxView(state.budgetRecon.lines, state.policy),
       } : null;
-      const hash = await runHash(state.results, state.policy, state.budgetRecon);
+      const hash = await runHash(state.results, state.policy, state.budgetRecon, state.stmtRows);
+      const statement = state.stmtRecon ? {
+        fileName: state.stmtInfo?.fileName ?? '',
+        lineCount: state.stmtRows.length,
+        skipped: state.stmtInfo?.skipped ?? 0,
+        recon: state.stmtRecon,
+      } : null;
       const wb = buildWorkbook(XLSX, state.results, {
         hash,
         budget,
+        statement,
         reviews: state.reviews,
         policy: state.policy,
         generatedAt: new Date().toISOString().slice(0, 19).replace('T', ' '),

@@ -66,6 +66,9 @@ export const DEFAULT_POLICY = {
   fxRates: {},            // e.g. { EUR: 1.08 } means 1 EUR = 1.08 USD
 
   // ---- process -----------------------------------------------------------
+  // Card post dates lag purchase dates; a statement charge matches an expense
+  // row when their dates sit within this many days (and amounts agree).
+  statementDateToleranceDays: 5,
   staleSubmissionDays: 60,
   // A weekend date is only a signal for discretionary, in-person spend. Travel
   // happens on weekends by nature, and a recurring subscription bills on
@@ -511,12 +514,20 @@ export function checkBatch(rows, policy = DEFAULT_POLICY) {
 
 // --------------------------------------------------------------------------
 
-/** Run every check and return one result per row, in input order. */
-export function auditAll(rows, extractions, policy = DEFAULT_POLICY) {
+/** Run every check and return one result per row, in input order.
+ *
+ *  @param extra  optional Map(txnId -> findings[]) merged in like the batch
+ *  findings — how statement-reconciliation findings reach row status. Omitted,
+ *  behaviour is byte-identical to before the parameter existed. */
+export function auditAll(rows, extractions, policy = DEFAULT_POLICY, extra = null) {
   const batch = checkBatch(rows, policy);
   return rows.map((row) => {
     const ext = extractions.get(row.txnId) ?? null;
-    const findings = [...checkRow(row, ext, policy), ...(batch.get(row.txnId) || [])];
+    const findings = [
+      ...checkRow(row, ext, policy),
+      ...(batch.get(row.txnId) || []),
+      ...(extra?.get(row.txnId) || []),
+    ];
     const hard = findings.filter((f) => f.severity === SEVERITY.HARD);
     const soft = findings.filter((f) => f.severity === SEVERITY.SOFT);
     return {

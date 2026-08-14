@@ -43,7 +43,7 @@ function styleSheet(ws, widths, freeze = 'A2') {
  *  Returns null on an insecure origin (crypto.subtle needs https or localhost),
  *  in which case the workbook simply says the hash was unavailable rather than
  *  printing something untrue. */
-export async function runHash(results, policy, budget = null) {
+export async function runHash(results, policy, budget = null, statement = null) {
   if (!globalThis.crypto?.subtle) return null;
   const material = JSON.stringify({
     ruleset: RULESET_VERSION,
@@ -58,6 +58,11 @@ export async function runHash(results, policy, budget = null) {
     // Only present when a budget was reconciled, so every hash produced before
     // this feature existed still reproduces byte for byte.
     ...(budget ? { budgetLines: budget.lines } : {}),
+    // Same rule for the card statement: absent means absent, and the parsed
+    // lines (not the raw file) are what the reconciliation actually consumed.
+    ...(statement ? {
+      statementLines: statement.map((s) => [s.line, s.date, s.description, s.amount, s.currency]),
+    } : {}),
   });
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(material));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -169,6 +174,14 @@ export function buildWorkbook(XLSX, results, meta) {
     summary.push(['  Could not be verified', meta.budget.lines.filter((l) => l.status === 'unverified').length]);
   }
 
+  if (meta.statement) {
+    summary.push([], ['Card statement reconciliation (details on the Statement Recon tab)']);
+    summary.push(['  Statement charges considered', meta.statement.lineCount]);
+    summary.push(['  Matched to expense rows', meta.statement.recon.matchedCount]);
+    summary.push(['  Charges never expensed (UNCLAIMED_CHARGE)', meta.statement.recon.unclaimed.length]);
+    summary.push(['  Expense rows with no charge (CLAIMED_NOT_ON_STATEMENT)', meta.statement.recon.notOnStatement.length]);
+  }
+
   const wsSummary = XLSX.utils.aoa_to_sheet(summary);
   wsSummary['!cols'] = [col(34), col(46), col(13), col(24)];
   XLSX.utils.book_append_sheet(wb, wsSummary, 'Summary');
@@ -276,6 +289,41 @@ export function buildWorkbook(XLSX, results, meta) {
     XLSX.utils.book_append_sheet(wb, wsBud, 'Budget Recon');
   }
 
+  // ---- Statement Recon ---------------------------------------------------
+  // Only present when the user supplied a card-statement export.
+  if (meta.statement) {
+    const st = meta.statement;
+    const stm = [
+      ['Card statement reconciliation'],
+      [],
+      ['Statement file', st.fileName || ''],
+      ['Statement charges considered', st.lineCount],
+      ['Payment / credit lines skipped', st.skipped],
+      ['Rule', `A charge matches an expense row when the amounts agree within ` +
+        `${policy.amountToleranceAbs.toFixed(2)} and the dates within ` +
+        `${policy.statementDateToleranceDays} days, in the same currency when both state one. ` +
+        `Amounts are compared as absolute values because issuers disagree on sign. ` +
+        `Matching is one-to-one: a charge absolves at most one row.`],
+      [],
+      ['Matched', st.recon.matchedCount],
+      ['Charges never expensed (UNCLAIMED_CHARGE, exception)', st.recon.unclaimed.length],
+      ['Expense rows with no charge (CLAIMED_NOT_ON_STATEMENT, review)', st.recon.notOnStatement.length],
+    ];
+    if (st.recon.unclaimed.length) {
+      stm.push([], ['Unclaimed charges'], ['Statement line', 'Date', 'Description', 'Amount', 'Currency']);
+      for (const s of st.recon.unclaimed) {
+        stm.push([s.line, s.date, s.description, s.amount, s.currency ?? '']);
+      }
+    }
+    if (st.recon.notOnStatement.length) {
+      stm.push([], ['Expense rows with no matching charge (flagged on the Exceptions tab)'],
+        [st.recon.notOnStatement.join(', ')]);
+    }
+    const wsStm = XLSX.utils.aoa_to_sheet(stm);
+    wsStm['!cols'] = [26, 12, 40, 12, 10].map(col);
+    XLSX.utils.book_append_sheet(wb, wsStm, 'Statement Recon');
+  }
+
   // ---- Methodology -------------------------------------------------------
   // Stating the limits is not a disclaimer, it is the part that makes the
   // report honest. A reader must know what was NOT verified.
@@ -291,7 +339,9 @@ export function buildWorkbook(XLSX, results, meta) {
     ['  3. Neither', 'Flagged as UNREADABLE_RECEIPT for manual check. Never guessed.'],
     [],
     ['What this report does NOT do'],
-    ['  No bank or card statement was compared', 'Only the expense report and its attached documents were examined. A charge could exist with no row at all and this report would not see it.'],
+    meta.statement
+      ? ['  Card statement compared from a local file only', 'The supplied statement export was reconciled line by line against the expense rows (see the Statement Recon tab). No bank connection exists; only the file the user chose was read.']
+      : ['  No bank or card statement was compared', 'Only the expense report and its attached documents were examined. A charge could exist with no row at all and this report would not see it.'],
     ['  Business purpose was not judged', 'Whether a stated purpose is genuine is a human judgement and was not assessed.'],
     ['  Mileage and per-diem rows cannot be verified', 'These have no support document by nature. Only arithmetic plausibility can be checked.'],
     ['  Categories exempted from the receipt requirement',

@@ -121,12 +121,23 @@
         <span class="drop-hint">Click to pick the folder, or drop the files in. PDFs and JPG/PNG/WEBP photos both work.</span>
         <span class="drop-status" id="statusReceipts">No receipts chosen</span>
       </label>
+
+      <label class="drop" id="dropStatement" for="fileStatement">
+        <input type="file" id="fileStatement" accept=".xlsx,.xls,.csv" class="sr-only">
+        <svg class="drop-icon" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18M7 15h4"/>
+        </svg>
+        <span class="drop-title">Card statement (optional)</span>
+        <span class="drop-hint">The month's card export. Catches charges that were never expensed at all.</span>
+        <span class="drop-status" id="statusStatement">None loaded</span>
+      </label>
     </div>
 
     <!-- Outside the label on purpose: a button inside it would re-open the
          file picker on every click. -->
     <p class="dropaside">
       <button type="button" class="btn quiet small" id="btnClearReceipts" hidden>Clear receipts</button>
+      <button type="button" class="btn quiet small" id="btnClearStatement" hidden>Clear statement</button>
     </p>
 
     <!-- Only shown for a workbook with more than one sheet: which sheet holds
@@ -235,6 +246,25 @@
       <div id="budgetFindings"></div>
       <!-- Filled only when the user typed FX rates into the policy panel. -->
       <div class="budgetfx" id="budgetFx" hidden></div>
+    </div>
+
+    <!-- Statement reconciliation, only when a card statement was supplied. -->
+    <div class="budgetcard" id="stmtCard" hidden>
+      <h3>Card statement reconciliation</h3>
+      <p class="microcopy" id="stmtMeta"></p>
+      <div class="tablewrap" id="stmtTableWrap" hidden>
+        <table id="stmtTable">
+          <caption class="sr-only">Statement charges that match no expense row.</caption>
+          <thead><tr>
+            <th><span class="th-plain">Statement line</span></th>
+            <th><span class="th-plain">Date</span></th>
+            <th><span class="th-plain">Description</span></th>
+            <th class="right"><span class="th-plain">Amount</span></th>
+            <th><span class="th-plain">Status</span></th>
+          </tr></thead>
+          <tbody id="stmtBody"></tbody>
+        </table>
+      </div>
     </div>
 
     <div class="results-bar">
