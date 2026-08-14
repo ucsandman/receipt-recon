@@ -6,7 +6,7 @@ You drop in a spreadsheet and a folder of receipts. Every row gets matched to it
 support document, checked against policy, and you get an Excel workbook saying what
 is wrong, why, and which receipt proves it.
 
-**[Try it now →](https://ucsandman.github.io/receipt-recon/)** · no install, no signup, no API key
+**[Try it now →](https://receipt-recon.com/)** · no install, no signup, no API key
 
 ![Results screen](docs/screenshots/02-results.png)
 
@@ -140,7 +140,7 @@ python tools/make_sample_data.py --count 350
 
 ## Using it on real data
 
-1. Open the [live page](https://ucsandman.github.io/receipt-recon/), or download this
+1. Open the [live page](https://receipt-recon.com/), or download this
    repo and open `index.html` through any local server.
 2. Drop in your expense report. Column headers are matched loosely, so `Amount`,
    `Total`, `Claimed` and `Gross` all work. A multi-sheet workbook is fine: the
