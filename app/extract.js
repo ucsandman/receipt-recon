@@ -246,6 +246,72 @@ async function renderToCanvas(doc, desired = OCR_SCALE) {
 }
 
 // --------------------------------------------------------------------------
+// Image receipts: what a phone actually produces.
+// --------------------------------------------------------------------------
+
+export const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp'];
+
+/** A photo has no text layer, so it enters the ladder directly at Tier 2.
+ *  Same result shape as extractReceipt, same refusal to guess: a photo that
+ *  cannot be decoded or read is a loud 'failed', never a silent skip.
+ *
+ *  @param {File} file   the image
+ *  @param {object} deps { getOcrWorker } */
+export async function extractReceiptImage(file, deps) {
+  const { getOcrWorker } = deps;
+  if (!getOcrWorker) {
+    return {
+      tier: 'failed', confidence: 0, text: '', numPages: 1,
+      fields: { warnings: ['Image receipt and OCR is disabled.'] },
+      error: 'Image receipt; OCR disabled.',
+    };
+  }
+  let bitmap;
+  try {
+    bitmap = await createImageBitmap(file);
+  } catch (err) {
+    return {
+      tier: 'failed', confidence: 0, text: '', numPages: 1,
+      fields: { warnings: [] },
+      error: `Image could not be decoded: ${err.message}`,
+    };
+  }
+  try {
+    // Photos are already raster, so the desired scale is 1; the clamp only
+    // bites on an absurd megapixel count, same guard as the PDF path.
+    const scale = clampScale(bitmap.width, bitmap.height, 1);
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.ceil(bitmap.width * scale);
+    canvas.height = Math.ceil(bitmap.height * scale);
+    canvas.getContext('2d', { willReadFrequently: true })
+      .drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    bitmap.close();
+
+    const worker = await getOcrWorker();
+    const { data } = await worker.recognize(canvas);
+    canvas.width = canvas.height = 0;
+
+    const fields = parseFields(data.text);
+    if (scale < 1) {
+      fields.warnings.push(
+        `Photo is unusually large, so it was read at ${scale.toFixed(2)}x size to stay within ` +
+        `a safe canvas size. Text may have been harder to read.`);
+    }
+    if (data.confidence < 70) {
+      fields.warnings.push(
+        `Low OCR confidence (${data.confidence.toFixed(0)}%). Verify this receipt by hand.`);
+    }
+    return { tier: 'ocr', confidence: data.confidence, text: data.text, numPages: 1, fields, isImage: true };
+  } catch (err) {
+    return {
+      tier: 'failed', confidence: 0, text: '', numPages: 1,
+      fields: { warnings: [] },
+      error: `OCR failed: ${err.message}`,
+    };
+  }
+}
+
+// --------------------------------------------------------------------------
 
 const MIN_TEXT_CHARS = 20;  // below this, treat the PDF as image-only
 

@@ -491,6 +491,7 @@ td.mono { font-family: var(--mono); font-size: var(--t-sm); white-space: nowrap;
 .compare tr:last-child td { border-bottom: none; }
 
 .pdfview canvas { width: 100%; height: auto; border: 1px solid var(--line); border-radius: var(--r-md); display: block; }
+.pdfview .panel-photo { max-width: 100%; height: auto; border: 1px solid var(--line); border-radius: var(--r-md); display: block; }
 .pdfnav {
   display: flex; align-items: center; gap: var(--s-2);
   margin-bottom: var(--s-2); flex-wrap: wrap;

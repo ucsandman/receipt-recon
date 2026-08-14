@@ -13,7 +13,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
-import { extractReceipt, clampScale, MAX_RASTER_PX, __test__ } from '../app/extract.js';
+import { extractReceipt, extractReceiptImage, clampScale, MAX_RASTER_PX, IMAGE_EXTENSIONS, __test__ } from '../app/extract.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TRUTH = JSON.parse(fs.readFileSync(path.join(ROOT, 'sample-data/ground-truth.json'), 'utf8'));
@@ -163,4 +163,22 @@ test('scan-only receipts are correctly detected as needing OCR', async () => {
     assert.equal(r.tier, 'failed', `${t.txn_id} has no text layer, must escalate`);
     assert.match(r.error, /Image-only/, 'must say why it escalated');
   }
+});
+
+// --------------------------------------------------------------------------
+// Image receipts: phone photos enter the ladder at the OCR tier. The browser
+// half (createImageBitmap, the worker) is covered in tools/browser-check.mjs;
+// what node can prove is the contract around it.
+// --------------------------------------------------------------------------
+
+test('the accepted image extensions are the four a phone actually produces', () => {
+  assert.deepEqual(IMAGE_EXTENSIONS, ['.jpg', '.jpeg', '.png', '.webp']);
+});
+
+test('an image receipt with OCR disabled fails loudly, never silently', async () => {
+  // Must not touch createImageBitmap (absent in node): the guard comes first.
+  const res = await extractReceiptImage({ name: 'r.jpg' }, { getOcrWorker: null });
+  assert.equal(res.tier, 'failed');
+  assert.match(res.error, /OCR/i);
+  assert.deepEqual(res.fields.warnings.length >= 1, true);
 });

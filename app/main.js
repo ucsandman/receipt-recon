@@ -6,7 +6,7 @@
 // rather than just asserting it.
 
 import * as pdfjsLib from '../vendor/pdf.min.mjs';
-import { extractReceipt, clampScale } from './extract.js';
+import { extractReceipt, extractReceiptImage, clampScale, IMAGE_EXTENSIONS } from './extract.js';
 import { mapHeaders, normalizeDate, toNumber, pickTransactionSheet } from './sheet.js';
 import { auditAll, sanitizePolicy, DEFAULT_POLICY } from './rules.js';
 import { parseBudgetSheet, pickBudgetSheet, reconcileBudget, fxView } from './budget.js';
@@ -35,6 +35,7 @@ const state = {
   lastTrigger: null,     // element focus returns to when the panel closes
   panelToken: 0,         // guards against a slow PDF render landing in a newer panel
   panelTask: null,       // the open drawer's PDF, kept alive for page navigation
+  panelImgUrl: null,     // the open drawer's photo object URL, revoked on close
   ocrWorker: null,
   ocrUsed: 0,
   reportName: '',
@@ -257,13 +258,24 @@ function announce(msg) { $('srStatus').textContent = msg; }
 /** Receipt filenames in the sheet rarely match the folder exactly: extra
  *  paths, different case, a missing .pdf. Resolve generously, then fall back
  *  to matching on the transaction id, which is how most exports name them. */
+const RECEIPT_EXTENSIONS = ['.pdf', ...IMAGE_EXTENSIONS];
+const isImageFile = (name) => IMAGE_EXTENSIONS.some((e) => name.toLowerCase().endsWith(e));
+
 function resolveReceipt(row) {
   const tries = [];
   if (row.receiptFile) {
     const base = String(row.receiptFile).split(/[\\/]/).pop().toLowerCase();
-    tries.push(base, base.endsWith('.pdf') ? base.slice(0, -4) : `${base}.pdf`);
+    tries.push(base);
+    // A sheet that omits the extension can mean a PDF or a photo; try both.
+    if (!RECEIPT_EXTENSIONS.some((e) => base.endsWith(e))) {
+      for (const e of RECEIPT_EXTENSIONS) tries.push(`${base}${e}`);
+    } else if (base.endsWith('.pdf')) {
+      tries.push(base.slice(0, -4));
+    }
   }
-  if (row.txnId) tries.push(`${String(row.txnId).toLowerCase()}.pdf`);
+  if (row.txnId) {
+    for (const e of RECEIPT_EXTENSIONS) tries.push(`${String(row.txnId).toLowerCase()}${e}`);
+  }
   for (const t of tries) if (state.receipts.has(t)) return state.receipts.get(t);
   return null;
 }
@@ -304,6 +316,11 @@ async function runAudit() {
               error: `File "${row.receiptFile}" was not found among the receipts you loaded.`,
             });
           }
+        } else if (isImageFile(file.name)) {
+          // A photo has no text layer; it enters the ladder at the OCR tier.
+          const res = await extractReceiptImage(file, { getOcrWorker });
+          if (res.tier === 'ocr') state.ocrUsed++;
+          extractions.set(row.txnId, res);
         } else {
           const bytes = new Uint8Array(await file.arrayBuffer());
           const res = await extractReceipt(bytes, { pdfjsLib, getOcrWorker });
@@ -612,6 +629,16 @@ async function openPanel(txnId, tr) {
     holder.innerHTML = '<p class="microcopy">No support document was loaded for this row.</p>';
     return;
   }
+  // A photo needs no pdf.js: show it directly, at its own aspect ratio.
+  if (isImageFile(file.name)) {
+    state.panelImgUrl = URL.createObjectURL(file);
+    const img = document.createElement('img');
+    img.src = state.panelImgUrl;
+    img.alt = `Receipt photo for ${r.row.txnId}`;
+    img.className = 'panel-photo';
+    holder.replaceChildren(img);
+    return;
+  }
   try {
     const task = pdfjsLib.getDocument({ data: new Uint8Array(await file.arrayBuffer()) });
     const doc = await task.promise;
@@ -688,6 +715,10 @@ function releasePanelPdf() {
   const task = state.panelTask;
   state.panelTask = null;
   if (task) Promise.resolve(task.destroy()).catch(() => { /* already gone */ });
+  if (state.panelImgUrl) {
+    URL.revokeObjectURL(state.panelImgUrl);
+    state.panelImgUrl = null;
+  }
 }
 
 function closePanel({ restoreFocus = true } = {}) {
@@ -1005,10 +1036,18 @@ function changeSheetSelection() {
   updateRunButton();
 }
 
-function paintReceiptStatus(skipped = 0) {
+function paintReceiptStatus(skippedNames = []) {
   const n = state.receipts.size;
+  // Skipped files are reported BY NAME: "3 ignored" tells the user nothing
+  // about whether their receipts made it in.
+  let skippedNote = '';
+  if (skippedNames.length) {
+    const shown = skippedNames.slice(0, 3).join(', ');
+    const more = skippedNames.length - 3;
+    skippedNote = ` · ignored: ${shown}${more > 0 ? ` and ${more} more` : ''}`;
+  }
   $('statusReceipts').textContent = n
-    ? `${n} PDF${n === 1 ? '' : 's'} loaded${skipped ? ` · ${skipped} non-PDF ignored` : ''}`
+    ? `${n} receipt${n === 1 ? '' : 's'} loaded${skippedNote}`
     : 'No receipts chosen';
   $('dropReceipts').classList.toggle('filled', n > 0);
   $('btnClearReceipts').hidden = n === 0;
@@ -1026,12 +1065,13 @@ function paintReceiptStatus(skipped = 0) {
  *  stragglers to a set you already have. */
 function acceptReceipts(files, { replace = false } = {}) {
   if (replace) state.receipts.clear();
-  let skipped = 0;
+  const skipped = [];
   for (const f of files) {
-    if (f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf')) {
-      state.receipts.set(f.name.split(/[\\/]/).pop().toLowerCase(), f);
+    const name = f.name.toLowerCase();
+    if (f.type === 'application/pdf' || RECEIPT_EXTENSIONS.some((e) => name.endsWith(e))) {
+      state.receipts.set(name.split(/[\\/]/).pop(), f);
     } else {
-      skipped++;
+      skipped.push(f.name);
     }
   }
   paintReceiptStatus(skipped);
