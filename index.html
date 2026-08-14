@@ -144,6 +144,19 @@
       <span class="policy-hint" id="budgetHint"></span>
     </div>
 
+    <!-- Which spreadsheet column feeds which field. The guesses are usually
+         right; this is the diagnosis path for when they are not, and the only
+         one a non-developer has. Corrections are remembered per header row. -->
+    <details class="colmap" id="colMap" hidden>
+      <summary>Columns we found — check the guesses</summary>
+      <p class="microcopy">
+        Each field below shows the spreadsheet column that feeds it. If a guess is
+        wrong, pick the right column. Your correction is remembered on this computer
+        for files with this exact header row.
+      </p>
+      <div class="colmap-grid" id="colMapGrid"></div>
+    </details>
+
     <div class="actions">
       <button class="btn primary" id="btnRun" disabled>Run the audit</button>
       <button class="btn" id="btnSample">Try it with sample data</button>

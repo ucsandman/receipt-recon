@@ -24,6 +24,7 @@ const state = {
   results: [],
   sheets: [],            // every sheet of the workbook, as {name, aoa}
   txnSheetIndex: -1,
+  columnMap: null,       // field -> column index, user-correctable
   budgetSheetIndex: -1,  // -1 means no budget sheet in play
   budgetEntries: null,
   budgetRecon: null,
@@ -114,10 +115,9 @@ async function readWorkbook(file) {
   }));
 }
 
-function rowsFromSheet(aoa) {
+function rowsFromSheet(aoa, map) {
   if (!aoa.length) throw new Error('That sheet has no rows.');
 
-  const map = mapHeaders(aoa[0]);
   if (map.amount === undefined) {
     throw new Error('Could not find an amount column on that sheet. Expected a header like "Amount" or "Total".');
   }
@@ -137,6 +137,105 @@ function rowsFromSheet(aoa) {
       purpose: pick(r, 'purpose') ?? '',
       approver: pick(r, 'approver') ?? '',
     }));
+}
+
+// --------------------------------------------------------------------------
+// Column mapping: visible, correctable, remembered.
+//
+// Which column feeds which field used to be decided silently by mapHeaders and
+// the only fix for a bad guess was renaming headers in the source file — which
+// a non-developer auditor has no reason to suspect. The mapping now renders as
+// a disclosure of selects, and a correction is remembered on this computer,
+// keyed on the exact header row, so a monthly export is fixed once.
+// --------------------------------------------------------------------------
+
+const MAP_FIELDS = [
+  ['txnId', 'Transaction id'],
+  ['employee', 'Employee'],
+  ['date', 'Date'],
+  ['vendor', 'Vendor'],
+  ['category', 'Category'],
+  ['amount', 'Amount'],
+  ['currency', 'Currency'],
+  ['receiptFile', 'Receipt file'],
+  ['purpose', 'Business purpose'],
+  ['approver', 'Approver'],
+];
+
+const COLMAP_KEY = 'receipt-recon-colmap';
+const COLMAP_MAX = 20;
+
+const headerSignature = (header) =>
+  JSON.stringify(header.map((h) => String(h ?? '').trim().toLowerCase()));
+
+function rememberedMap(header) {
+  try {
+    const list = JSON.parse(localStorage.getItem(COLMAP_KEY) || '[]');
+    const hit = list.find(([sig]) => sig === headerSignature(header));
+    return hit ? { ...hit[1] } : null;
+  } catch { return null; }
+}
+
+function rememberMap(header, map) {
+  try {
+    const sig = headerSignature(header);
+    const list = JSON.parse(localStorage.getItem(COLMAP_KEY) || '[]')
+      .filter(([s]) => s !== sig);
+    list.unshift([sig, map]);
+    localStorage.setItem(COLMAP_KEY, JSON.stringify(list.slice(0, COLMAP_MAX)));
+  } catch { /* storage blocked by policy */ }
+}
+
+/** Spreadsheet-style column letter: 0 -> A, 26 -> AA. */
+function colLetter(i) {
+  let s = '';
+  let n = i + 1;
+  while (n > 0) { n--; s = String.fromCharCode(65 + (n % 26)) + s; n = Math.floor(n / 26); }
+  return s;
+}
+
+function renderColumnMap() {
+  const box = $('colMap');
+  if (state.txnSheetIndex < 0 || !state.columnMap) { box.hidden = true; return; }
+  const header = state.sheets[state.txnSheetIndex].aoa[0] || [];
+
+  $('colMapGrid').innerHTML = MAP_FIELDS.map(([field, label]) => {
+    const bound = state.columnMap[field];
+    const opts = [`<option value="-1"${bound === undefined ? ' selected' : ''}>Not in this sheet</option>`]
+      .concat(header.map((h, i) =>
+        `<option value="${i}"${i === bound ? ' selected' : ''}>${colLetter(i)} — ${esc(String(h ?? '').trim() || '(blank)')}</option>`));
+    return `<div class="colmap-item">
+      <label for="cm_${field}">${label}</label>
+      <select id="cm_${field}" data-field="${field}">${opts.join('')}</select>
+    </div>`;
+  }).join('');
+
+  for (const sel of $('colMapGrid').querySelectorAll('select[data-field]')) {
+    sel.addEventListener('change', (e) => {
+      const field = e.target.dataset.field;
+      const idx = Number(e.target.value);
+      if (idx === -1) delete state.columnMap[field];
+      else state.columnMap[field] = idx;
+      applyColumnMap();
+    });
+  }
+  box.hidden = false;
+}
+
+/** Re-derive the rows from the current mapping and say what happened. */
+function applyColumnMap() {
+  const aoa = state.sheets[state.txnSheetIndex].aoa;
+  if (state.columnMap.amount === undefined) {
+    state.rows = [];
+    showBanner('Pick a column for Amount. The audit cannot run without one.');
+    updateRunButton();
+    return;
+  }
+  state.rows = rowsFromSheet(aoa, state.columnMap);
+  rememberMap(aoa[0], state.columnMap);
+  clearBanner();
+  paintSheetStatus();
+  updateRunButton();
 }
 
 // --------------------------------------------------------------------------
@@ -829,7 +928,9 @@ async function acceptSheet(file) {
     state.rows = [];
     state.sheets = [];
     state.budgetEntries = null;
+    state.columnMap = null;
     $('sheetChoice').hidden = true;
+    $('colMap').hidden = true;
     $('statusSheet').textContent = 'Could not read that file';
     $('dropSheet').classList.remove('filled');
     showBanner(err.message);
@@ -842,13 +943,22 @@ async function acceptSheet(file) {
  *  so a wrong guess is visible before the run rather than after it. */
 function applySheetSelection() {
   const txnSheet = state.sheets[state.txnSheetIndex];
-  state.rows = rowsFromSheet(txnSheet.aoa);
+  const header = txnSheet.aoa[0] || [];
+  // A correction made last month for this exact header row outranks the guess.
+  state.columnMap = rememberedMap(header) ?? mapHeaders(header);
+  state.rows = rowsFromSheet(txnSheet.aoa, state.columnMap);
   const parsed = state.budgetSheetIndex >= 0
     ? parseBudgetSheet(state.sheets[state.budgetSheetIndex].aoa)
     : null;
   state.budgetEntries = parsed?.entries ?? null;
 
   renderSheetChoice();
+  renderColumnMap();
+  paintSheetStatus();
+}
+
+function paintSheetStatus() {
+  const txnSheet = state.sheets[state.txnSheetIndex];
   const bits = [`${state.reportName} · ${state.rows.length} rows`];
   if (state.sheets.length > 1) bits.push(`from “${txnSheet.name}”`);
   if (state.budgetEntries) {
@@ -887,6 +997,8 @@ function changeSheetSelection() {
     clearBanner();
   } catch (err) {
     state.rows = [];
+    state.columnMap = null;
+    $('colMap').hidden = true;
     $('statusSheet').textContent = 'That sheet does not hold the transactions';
     showBanner(err.message);
   }

@@ -602,6 +602,24 @@ td.mono { font-family: var(--mono); font-size: var(--t-sm); white-space: nowrap;
 /* A flagged-value tile listing more than one currency. */
 .tile .n.n-multi { font-size: var(--t-lg); line-height: 1.35; }
 
+/* ---------- column-mapping disclosure ---------- */
+.colmap {
+  margin: var(--s-3) 0; padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2);
+}
+.colmap summary { cursor: pointer; font-weight: 600; }
+.colmap-grid {
+  display: grid; gap: var(--s-2) var(--s-3);
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  margin-top: var(--s-2);
+}
+.colmap-item { display: flex; flex-direction: column; gap: 4px; }
+.colmap-item label { font-size: var(--t-sm); color: var(--ink-2); }
+.colmap-item select {
+  padding: 6px 8px; border-radius: var(--r-sm);
+  border: 1px solid var(--line); background: var(--bg); color: var(--ink);
+}
+
 /* Add-a-category-limit row in the policy editor. */
 .policy-addrow { display: flex; gap: var(--s-2); }
 .policy-addrow input[type="text"] { flex: 1 1 auto; min-width: 0; }
