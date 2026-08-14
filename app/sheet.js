@@ -32,6 +32,24 @@ export function mapHeaders(header) {
   return map;
 }
 
+/** Which sheet of a workbook is the transaction table.
+ *
+ *  Real workbooks put a cover sheet first, and reading SheetNames[0] blindly
+ *  either failed the import or audited the cover sheet. A sheet qualifies only
+ *  if its first row maps to an amount column; among qualifiers, the one whose
+ *  header maps the most transaction fields wins, and a tie keeps workbook
+ *  order. Returns -1 when no sheet qualifies. */
+export function pickTransactionSheet(sheets) {
+  let best = -1, bestScore = 0;
+  sheets.forEach((s, i) => {
+    const map = mapHeaders(s.aoa?.[0] ?? []);
+    if (map.amount === undefined) return;
+    const score = Object.keys(map).length;
+    if (score > bestScore) { best = i; bestScore = score; }
+  });
+  return best;
+}
+
 export function excelSerialToISO(n) {
   // Excel day 0 is 1899-12-30 (Lotus leap-year bug included, on purpose).
   const ms = Math.round((n - 25569) * 86400000);

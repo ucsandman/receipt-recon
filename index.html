@@ -129,6 +129,21 @@
       <button type="button" class="btn quiet small" id="btnClearReceipts" hidden>Clear receipts</button>
     </p>
 
+    <!-- Only shown for a workbook with more than one sheet: which sheet holds
+         the transactions, and which (if any) is the budget cover sheet. The
+         guesses are usually right; the controls exist for when they are not. -->
+    <div class="sheetchoice" id="sheetChoice" hidden>
+      <div class="sheetchoice-item">
+        <label for="selTxnSheet">Transactions are on</label>
+        <select id="selTxnSheet"></select>
+      </div>
+      <div class="sheetchoice-item">
+        <label for="selBudgetSheet">Budget / cover sheet</label>
+        <select id="selBudgetSheet"></select>
+      </div>
+      <span class="policy-hint" id="budgetHint"></span>
+    </div>
+
     <div class="actions">
       <button class="btn primary" id="btnRun" disabled>Run the audit</button>
       <button class="btn" id="btnSample">Try it with sample data</button>
@@ -149,8 +164,9 @@
       Policy settings
     </h2>
     <p class="microcopy">
-      These are the thresholds every check uses. Change them to match your own policy.
-      They are written into the audit workbook so a reviewer can see exactly what was applied.
+      These are the thresholds and word lists every check uses. Change them to match your
+      own in-house policy: they are remembered on this computer (never uploaded) and written
+      into the audit workbook so a reviewer can see exactly what was applied.
     </p>
     <div class="policygrid" id="policyGrid"></div>
     <div class="actions">
@@ -176,6 +192,27 @@
     <h2><span class="num">3</span> Results</h2>
 
     <div class="tiles" id="tiles"></div>
+
+    <!-- Budget reconciliation, only when the workbook carried a budget. -->
+    <div class="budgetcard" id="budgetCard" hidden>
+      <h3>Budget reconciliation</h3>
+      <p class="microcopy" id="budgetMeta"></p>
+      <div class="tablewrap">
+        <table id="budgetTable">
+          <caption class="sr-only">Each budget line against what the report actually spent, in that line's own currency.</caption>
+          <thead><tr>
+            <th><span class="th-plain">Budget line</span></th>
+            <th><span class="th-plain">Currency</span></th>
+            <th class="right"><span class="th-plain">Budget</span></th>
+            <th class="right"><span class="th-plain">Spent</span></th>
+            <th class="right"><span class="th-plain">Difference</span></th>
+            <th><span class="th-plain">Status</span></th>
+          </tr></thead>
+          <tbody id="budgetBody"></tbody>
+        </table>
+      </div>
+      <div id="budgetFindings"></div>
+    </div>
 
     <div class="results-bar">
       <div class="filters" id="filters" role="group" aria-label="Filter rows by status">

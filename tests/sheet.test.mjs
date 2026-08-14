@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { mapHeaders, normalizeDate, toNumber, excelSerialToISO } from '../app/sheet.js';
+import { mapHeaders, normalizeDate, toNumber, excelSerialToISO, pickTransactionSheet } from '../app/sheet.js';
 
 // Two zones 25 hours apart. Anything parsed through the ambient Date parser and
 // then run through .toISOString() lands on a different calendar day in these two.
@@ -110,4 +110,36 @@ test('money parses out of the formats a spreadsheet actually holds', () => {
   assert.equal(toNumber(''), null);
   assert.equal(toNumber(null), null);
   assert.equal(toNumber('not a number'), null);
+});
+
+// --------------------------------------------------------------------------
+// picking the transaction sheet out of a multi-sheet workbook
+//
+// Real workbooks put a cover sheet first. Reading SheetNames[0] blindly either
+// crashed the import or, worse, audited the cover sheet.
+// --------------------------------------------------------------------------
+
+test('the transaction sheet is found even when a cover sheet comes first', () => {
+  const sheets = [
+    { name: 'Cover', aoa: [['Acme GmbH'], ['Category', 'Budget'], ['Meals', 500]] },
+    { name: 'Expenses', aoa: [['Txn ID', 'Employee', 'Date', 'Vendor', 'Amount', 'Currency'], ['T1', 'A', '2026-07-01', 'X', 10, 'EUR']] },
+  ];
+  assert.equal(pickTransactionSheet(sheets), 1);
+});
+
+test('with no amount column anywhere, no sheet qualifies', () => {
+  const sheets = [
+    { name: 'Notes', aoa: [['Remember'], ['to file']] },
+    { name: 'Cover', aoa: [['Category', 'Owner'], ['Meals', 'A']] },
+  ];
+  assert.equal(pickTransactionSheet(sheets), -1);
+});
+
+test('a tie between equally plausible sheets keeps workbook order', () => {
+  const header = ['Txn ID', 'Date', 'Amount'];
+  const sheets = [
+    { name: 'A', aoa: [header, ['T1', '2026-07-01', 10]] },
+    { name: 'B', aoa: [header, ['T2', '2026-07-02', 20]] },
+  ];
+  assert.equal(pickTransactionSheet(sheets), 0);
 });

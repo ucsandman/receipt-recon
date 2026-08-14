@@ -568,3 +568,36 @@ td.mono { font-family: var(--mono); font-size: var(--t-sm); white-space: nowrap;
     scroll-behavior: auto !important;
   }
 }
+
+/* ---------- sheet choice (multi-sheet workbooks) ---------- */
+.sheetchoice {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--s-3) var(--s-6); margin-top: var(--s-4);
+  padding: var(--s-4); border: 1px solid var(--line);
+  border-radius: var(--r-md); background: var(--surface-2);
+}
+.sheetchoice .policy-hint { grid-column: 1 / -1; }
+.sheetchoice-item { display: flex; flex-direction: column; gap: var(--s-1); }
+.sheetchoice-item label { font-size: var(--t-sm); color: var(--ink-2); }
+.sheetchoice-item select {
+  font: inherit; font-size: var(--t-md);
+  min-height: 38px; padding: var(--s-2) var(--s-3); border-radius: var(--r-sm);
+  border: 1px solid var(--line); background: var(--bg); color: var(--ink);
+}
+
+/* ---------- budget reconciliation card ---------- */
+.budgetcard {
+  margin-bottom: var(--s-5); padding: var(--s-4);
+  border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2);
+}
+.budgetcard h3 { margin: 0 0 var(--s-1); font-size: var(--t-lg); }
+.budgetcard .tablewrap { margin-top: var(--s-3); }
+.budgetcard #budgetFindings { margin-top: var(--s-3); }
+
+/* A flagged-value tile listing more than one currency. */
+.tile .n.n-multi { font-size: var(--t-lg); line-height: 1.35; }
+
+/* Add-a-category-limit row in the policy editor. */
+.policy-addrow { display: flex; gap: var(--s-2); }
+.policy-addrow input[type="text"] { flex: 1 1 auto; min-width: 0; }
+.policy-addrow input[type="number"] { flex: 0 0 90px; }

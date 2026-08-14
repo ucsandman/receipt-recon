@@ -94,6 +94,12 @@ Every rule is deterministic and every threshold is editable in the UI.
 **Policy**
 - `OVER_CATEGORY_LIMIT` · `POLICY_ALCOHOL` · `PERSONAL_EXPENSE`
 
+**Budget reconciliation**, when the workbook carries a budget or cover sheet
+- `BUDGET_EXCEEDED` — a category's spend crossed its budget line, compared strictly within that line's own currency
+- `BUDGET_CURRENCY_UNMATCHED` — spend in a currency the budget has no line for; reported for a human, never converted with a guessed FX rate
+- `BUDGET_CURRENCY_AMBIGUOUS` — a budget line with no stated currency over spend in several currencies; unverifiable, and says so
+- `BUDGET_UNBUDGETED_SPEND` — spend in a category the budget never mentions
+
 **Patterns across the whole batch** (invisible to any per-row check)
 - `DUPLICATE_RECEIPT` — the same PDF cited by two rows; both get flagged, because the tool cannot know which is the original
 - `DUPLICATE_CHARGE` — same vendor, date and amount claimed twice under different receipts
@@ -104,13 +110,14 @@ Every rule is deterministic and every threshold is editable in the UI.
 
 ## What you get
 
-A four-tab `.xlsx`:
+An `.xlsx` with four tabs, five when a budget was reconciled:
 
 | Tab | What's in it |
 | --- | --- |
-| **Summary** | Counts, value flagged, findings by rule, and a SHA-256 run hash |
+| **Summary** | Counts, value flagged per currency, findings by rule, and a SHA-256 run hash |
 | **Audit Detail** | Every transaction, not just the problems, with how each receipt was read and at what confidence |
 | **Exceptions** | One row per finding, with the triggering value, the threshold, and blank **reviewer decision / reviewer / date / note** columns |
+| **Budget Recon** | Each budget line against actual spend in its own currency, with the overruns and everything that could not be verified |
 | **Methodology** | The ruleset version, every threshold applied, and an explicit list of what was *not* verified |
 
 The run hash is the reproducibility proof: same report, same receipts, same policy,
@@ -136,10 +143,17 @@ python tools/make_sample_data.py --count 350
 1. Open the [live page](https://ucsandman.github.io/receipt-recon/), or download this
    repo and open `index.html` through any local server.
 2. Drop in your expense report. Column headers are matched loosely, so `Amount`,
-   `Total`, `Claimed` and `Gross` all work.
+   `Total`, `Claimed` and `Gross` all work. A multi-sheet workbook is fine: the
+   sheet holding the transactions is found automatically, and if the workbook has
+   a budget or cover sheet (a table with a category column and a budget column,
+   in one currency or several), it is picked up and reconciled against the
+   report. Both guesses are shown as dropdowns you can override.
 3. Drop in the receipts folder. Files are matched by the receipt-file column, falling
    back to matching on the transaction ID.
-4. Adjust **Policy settings** to your own thresholds.
+4. Adjust **Policy settings** to your own thresholds and word lists — category
+   limits, alcohol and personal-expense keywords, receipt-exempt categories, all
+   of it. Your policy is remembered in this browser (never uploaded), so an
+   in-house policy is taught once.
 5. **Run the audit**, then download the workbook.
 
 Roughly a minute for 350 transactions when most have a text layer, longer if many

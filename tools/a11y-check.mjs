@@ -57,11 +57,13 @@ pass('sample audit completed');
 
 // ---- 3. sticky header actually sticks (the container is a real scrollport) ----
 const sticky = await page.evaluate(() => {
-  const wrap = document.querySelector('.tablewrap');
+  // Scoped to the results table: the budget card holds an earlier .tablewrap
+  // that is hidden (and unscrollable) on a workbook with no budget sheet.
+  const wrap = document.querySelector('#resultTable').closest('.tablewrap');
   const scrollable = wrap.scrollHeight > wrap.clientHeight;
-  const before = document.querySelector('thead th').getBoundingClientRect().top;
+  const before = document.querySelector('#resultTable thead th').getBoundingClientRect().top;
   wrap.scrollTop = 400;
-  const after = document.querySelector('thead th').getBoundingClientRect().top;
+  const after = document.querySelector('#resultTable thead th').getBoundingClientRect().top;
   wrap.scrollTop = 0;
   return { scrollable, before, after, moved: Math.abs(after - before) };
 });
