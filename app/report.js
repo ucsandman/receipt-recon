@@ -43,7 +43,7 @@ function styleSheet(ws, widths, freeze = 'A2') {
  *  Returns null on an insecure origin (crypto.subtle needs https or localhost),
  *  in which case the workbook simply says the hash was unavailable rather than
  *  printing something untrue. */
-export async function runHash(results, policy) {
+export async function runHash(results, policy, budget = null) {
   if (!globalThis.crypto?.subtle) return null;
   const material = JSON.stringify({
     ruleset: RULESET_VERSION,
@@ -55,9 +55,29 @@ export async function runHash(results, policy) {
       r.extraction?.fields?.total ?? null,
       r.findings.map((f) => f.code).sort(),
     ]),
+    // Only present when a budget was reconciled, so every hash produced before
+    // this feature existed still reproduces byte for byte.
+    ...(budget ? { budgetLines: budget.lines } : {}),
   });
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(material));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/** Per-currency sums over result rows, largest first.
+ *
+ *  Adding euro, yen and dollar figures into one number and labelling it USD is
+ *  simply false, and that is what the "Value flagged" tile and the Summary tab
+ *  used to do. Anything money-shaped that spans rows goes through here. */
+export function sumsByCurrency(results, keep = () => true) {
+  const sums = new Map();
+  for (const r of results) {
+    if (!keep(r) || typeof r.row.amount !== 'number') continue;
+    const cur = String(r.row.currency || 'USD').toUpperCase();
+    sums.set(cur, (sums.get(cur) || 0) + r.row.amount);
+  }
+  return [...sums.entries()]
+    .map(([c, v]) => [c, Number(v.toFixed(2))])
+    .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]));
 }
 
 export function buildWorkbook(XLSX, results, meta) {
@@ -68,8 +88,9 @@ export function buildWorkbook(XLSX, results, meta) {
   const review = results.filter((r) => r.status === 'needs-review');
   const clean = results.filter((r) => r.status === 'clean');
 
-  const claimed = results.reduce((s, r) => s + (r.row.amount || 0), 0);
-  const flagged = [...exceptions, ...review].reduce((s, r) => s + (r.row.amount || 0), 0);
+  // Per currency, never added together across currencies.
+  const claimedBy = sumsByCurrency(results);
+  const flaggedBy = sumsByCurrency(results, (r) => r.status !== 'clean');
 
   // ---- Summary -----------------------------------------------------------
   const summary = [
@@ -89,9 +110,11 @@ export function buildWorkbook(XLSX, results, meta) {
     ['Needs review (soft signals)', review.length],
     ['Exceptions (require a decision)', exceptions.length],
     [],
-    ['Total claimed', Number(claimed.toFixed(2))],
-    ['Value on flagged rows', Number(flagged.toFixed(2))],
-    ['Share of value flagged', claimed ? `${((flagged / claimed) * 100).toFixed(1)}%` : 'n/a'],
+    ...claimedBy.map(([cur, v]) => [`Total claimed (${cur})`, v]),
+    ...claimedBy.map(([cur, v]) => {
+      const fl = flaggedBy.find(([c]) => c === cur)?.[1] ?? 0;
+      return [`Value on flagged rows (${cur})`, `${fl} (${v ? ((fl / v) * 100).toFixed(1) : '0.0'}%)`];
+    }),
     [],
     ['Findings by rule'],
   ];
@@ -104,6 +127,13 @@ export function buildWorkbook(XLSX, results, meta) {
     }
   }
   for (const [code, n] of [...byRule].sort((a, b) => b[1] - a[1])) summary.push([`  ${code}`, n]);
+
+  if (meta.budget) {
+    summary.push([], ['Budget reconciliation (details on the Budget Recon tab)']);
+    summary.push(['  Budget lines checked', meta.budget.lines.length]);
+    summary.push(['  Over budget', meta.budget.lines.filter((l) => l.status === 'over').length]);
+    summary.push(['  Could not be verified', meta.budget.lines.filter((l) => l.status === 'unverified').length]);
+  }
 
   const wsSummary = XLSX.utils.aoa_to_sheet(summary);
   wsSummary['!cols'] = [col(34), col(46)];
@@ -168,6 +198,31 @@ export function buildWorkbook(XLSX, results, meta) {
   styleSheet(wsExc, [10, 11, 22, 82, 11, 12, 11, 11, 16, 9, 18, 16, 14, 34]);
   XLSX.utils.book_append_sheet(wb, wsExc, 'Exceptions');
 
+  // ---- Budget Recon ------------------------------------------------------
+  // Only present when the workbook carried a budget to reconcile against.
+  if (meta.budget) {
+    const BUDGET_STATUS = { ok: 'Within budget', over: 'OVER BUDGET', unspent: 'Unspent', unverified: 'Unverified' };
+    const bud = [
+      ['Budget reconciliation'],
+      [],
+      ['Read from sheet', meta.budget.sheetName || ''],
+      ['Rule', 'Each budget line is compared only to spend in its own currency. Nothing was converted between currencies.'],
+      [],
+      ['Budget line', 'Currency', 'Budget', 'Spent', 'Difference', 'Status'],
+      ...meta.budget.lines.map((l) => [
+        l.label, l.currency ?? 'not stated', l.budget,
+        l.actual ?? '', l.delta ?? '', BUDGET_STATUS[l.status] ?? l.status,
+      ]),
+    ];
+    if (meta.budget.findings.length) {
+      bud.push([], ['Findings']);
+      for (const f of meta.budget.findings) bud.push([f.code, f.message]);
+    }
+    const wsBud = XLSX.utils.aoa_to_sheet(bud);
+    wsBud['!cols'] = [26, 11, 12, 12, 12, 110].map(col);
+    XLSX.utils.book_append_sheet(wb, wsBud, 'Budget Recon');
+  }
+
   // ---- Methodology -------------------------------------------------------
   // Stating the limits is not a disclaimer, it is the part that makes the
   // report honest. A reader must know what was NOT verified.
@@ -190,6 +245,7 @@ export function buildWorkbook(XLSX, results, meta) {
       (policy.noReceiptCategories || []).length
         ? `${policy.noReceiptCategories.join(', ')}. Rows in these categories were not asked for a receipt at any amount. They were still checked for date, place and business purpose.`
         : 'None. Every row was held to the receipt requirement.'],
+    ['  Currencies were never converted', 'Every comparison — row against receipt, spend against budget — happens within one currency. Cross-currency figures are flagged for a human, not converted with a rate this tool would have to guess.'],
     ['  Vendor matching is a similarity score', 'Names are compared fuzzily. The score and threshold are recorded on each finding so a reviewer can second-guess it.'],
     ['  Nothing was auto-cleared', 'Every exception needs a human decision. A blank reviewer column means the item is still open.'],
     [],

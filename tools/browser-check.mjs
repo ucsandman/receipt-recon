@@ -183,6 +183,119 @@ assert.deepEqual(afterCorrupt.unreadable, ['TX-1000'],
 ok(`one corrupt PDF costs exactly one row: ${afterCorrupt.rows} rows rendered, ${afterCorrupt.unreadable[0]} flagged`);
 fs.rmSync(corruptDir, { recursive: true, force: true });
 
+// ---- multi-sheet workbook with a multi-currency budget cover sheet -------
+// The shape a real user described: a cover sheet with a budget breakdown in
+// several currencies that the expense report has to reconcile against. The
+// fixture is built here with the same SheetJS build the page ships.
+// Built inside the page with the exact SheetJS build the page ships, then
+// round-tripped through a real file and the real file input.
+const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'recon-budget-'));
+const fixture = path.join(fixtureDir, 'report-with-cover.xlsx');
+{
+  const b64 = await page.evaluate(() => {
+    const wb = XLSX.utils.book_new();
+    const cover = XLSX.utils.aoa_to_sheet([
+      ['Acme GmbH'],
+      ['Monthly expense budget'],
+      [],
+      ['Category', 'Currency', 'Budget'],
+      ['Meals', 'EUR', 500],
+      ['Travel', 'USD', 2000],
+      ['Lodging', 'GBP', 800],
+      ['Software', 'USD', 100],
+    ]);
+    const expenses = XLSX.utils.aoa_to_sheet([
+      ['Txn ID', 'Employee', 'Date', 'Vendor', 'Category', 'Amount', 'Currency', 'Business Purpose'],
+      ['B-1', 'Ana', '2026-07-02', 'Bistro Uno', 'Meals', 300, 'EUR', 'client lunch'],
+      ['B-2', 'Ana', '2026-07-09', 'Bistro Due', 'Meals', 250, 'EUR', 'client dinner'],
+      ['B-3', 'Ana', '2026-07-10', 'RailCo', 'Travel', 500, 'USD', 'site visit'],
+      ['B-4', 'Ana', '2026-07-11', 'Tokyo Inn', 'Lodging', 10000, 'JPY', 'conference'],
+      ['B-5', 'Ana', '2026-07-12', 'City Cab', 'Taxis', 30, 'USD', 'airport'],
+    ]);
+    // Cover first, exactly the order that used to break the import.
+    XLSX.utils.book_append_sheet(wb, cover, 'Cover');
+    XLSX.utils.book_append_sheet(wb, expenses, 'Expenses');
+    return XLSX.write(wb, { type: 'base64', bookType: 'xlsx' });
+  });
+  fs.writeFileSync(fixture, Buffer.from(b64, 'base64'));
+}
+
+await page.setInputFiles('#fileSheet', fixture);
+await page.waitForFunction(() => /budget: 4 lines/.test(document.getElementById('statusSheet').textContent));
+ok('cover sheet first: transactions found on "Expenses", budget read from "Cover"');
+
+const choice = await page.evaluate(() => ({
+  visible: !document.getElementById('sheetChoice').hidden,
+  txn: document.getElementById('selTxnSheet').selectedOptions[0]?.textContent,
+  budget: document.getElementById('selBudgetSheet').selectedOptions[0]?.textContent,
+}));
+assert.equal(choice.visible, true, 'sheet choice controls should appear for a multi-sheet workbook');
+assert.equal(choice.txn, 'Expenses');
+assert.equal(choice.budget, 'Cover');
+ok('sheet pickers show the guess and allow overriding it');
+
+await page.evaluate(() => { document.getElementById('progText').textContent = 'rerunning'; });
+await page.click('#btnRun');
+await page.waitForFunction(() => /^Done\./.test(document.getElementById('progText').textContent),
+  null, { timeout: 60000 });
+await page.waitForSelector('#budgetCard:not([hidden])');
+
+const budgetUi = await page.evaluate(() => ({
+  rows: [...document.querySelectorAll('#budgetBody tr')].map((tr) =>
+    [...tr.children].map((td) => td.textContent.trim())),
+  findings: [...document.querySelectorAll('#budgetFindings .code')].map((c) => c.textContent),
+  flaggedTile: [...document.querySelectorAll('.tile')].at(-1).textContent,
+}));
+const mealsRow = budgetUi.rows.find((r) => r[0] === 'Meals');
+assert.equal(mealsRow.at(-1), 'Over budget', 'Meals is 550 EUR against a 500 EUR budget');
+assert.ok(mealsRow.some((c) => c.includes('€50')), `Meals over-budget delta should show €50, got: ${mealsRow.join(' | ')}`);
+assert.ok(budgetUi.findings.includes('BUDGET_EXCEEDED'), 'BUDGET_EXCEEDED should be listed');
+assert.ok(budgetUi.findings.includes('BUDGET_CURRENCY_UNMATCHED'),
+  'JPY lodging spend against a GBP budget line must be flagged, never converted');
+assert.ok(budgetUi.findings.includes('BUDGET_UNBUDGETED_SPEND'), 'Taxis has no budget line');
+ok(`budget card renders: ${budgetUi.rows.length} lines, findings ${budgetUi.findings.join(', ')}`);
+
+// The flagged-value tile must never add currencies together.
+assert.ok(budgetUi.flaggedTile.includes('€') && budgetUi.flaggedTile.includes('¥'),
+  `flagged tile should list currencies separately, got: ${budgetUi.flaggedTile}`);
+ok('flagged-value tile reports each currency separately');
+
+await page.locator('#budgetCard').scrollIntoViewIfNeeded();
+await page.screenshot({ path: path.join(SHOTS, '04-budget.png'), fullPage: false });
+
+// The workbook gains a Budget Recon tab, readable back with the same SheetJS.
+const [budDownload] = await Promise.all([
+  page.waitForEvent('download', { timeout: 60000 }),
+  page.click('#btnDownload'),
+]);
+const budOut = path.join(fixtureDir, 'budget-audit.xlsx');
+await budDownload.saveAs(budOut);
+const budBack = await page.evaluate((b64) => {
+  const wb = XLSX.read(b64, { type: 'base64' });
+  const tab = wb.Sheets['Budget Recon'];
+  return {
+    tabs: wb.SheetNames,
+    recon: tab ? XLSX.utils.sheet_to_json(tab, { header: 1 }) : [],
+  };
+}, fs.readFileSync(budOut).toString('base64'));
+assert.ok(budBack.tabs.includes('Budget Recon'), `workbook tabs: ${budBack.tabs.join(', ')}`);
+assert.ok(budBack.recon.some((r) => r[0] === 'Meals' && r[5] === 'OVER BUDGET'),
+  'Budget Recon tab should carry the Meals overrun');
+ok('audit workbook carries a Budget Recon tab with the overrun');
+fs.rmSync(fixtureDir, { recursive: true, force: true });
+
+// ---- the policy editor teaches an in-house policy ------------------------
+await page.click('#btnPolicy');
+const policyUi = await page.evaluate(() => ({
+  lists: ['p_alcoholKeywords', 'p_personalKeywords', 'p_tipEligibleCategories']
+    .map((id) => !!document.getElementById(id)),
+  addRow: !!document.getElementById('pc_newAdd'),
+}));
+assert.deepEqual(policyUi.lists, [true, true, true], 'keyword and category lists should be editable');
+assert.ok(policyUi.addRow, 'a new category limit can be added');
+ok('policy editor exposes the keyword lists and category limits');
+await page.click('#btnPolicy');
+
 // ---- the privacy claim ---------------------------------------------------
 assert.deepEqual(externalRequests, [],
   `page made external network requests: ${externalRequests.join(', ')}`);

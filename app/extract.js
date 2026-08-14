@@ -8,13 +8,13 @@
 // Tier 3 is a feature. An audit tool that guesses when it cannot read a
 // document is worse than one that says "read this one yourself".
 
-const CURRENCY_SYMBOLS = { $: 'USD', '€': 'EUR', '£': 'GBP', '¥': 'JPY', '₹': 'INR', '₩': 'KRW', '₪': 'ILS', '₫': 'VND', '₺': 'TRY', '₱': 'PHP' };
+export const CURRENCY_SYMBOLS = { $: 'USD', '€': 'EUR', '£': 'GBP', '¥': 'JPY', '₹': 'INR', '₩': 'KRW', '₪': 'ILS', '₫': 'VND', '₺': 'TRY', '₱': 'PHP' };
 
 // The old list was twelve codes. Anything outside it returned null, and because
 // CURRENCY_MISMATCH is gated on a parsed currency, an SGD or ZAR receipt raised
 // no currency finding at all while the amount check above it still compared the
 // claimed number against the receipt total as if they were the same unit.
-const CURRENCY_CODES = [
+export const CURRENCY_CODES = [
   'USD', 'EUR', 'GBP', 'CAD', 'AUD', 'NZD', 'JPY', 'CHF', 'SEK', 'NOK', 'DKK',
   'MXN', 'INR', 'SGD', 'HKD', 'CNY', 'KRW', 'TWD', 'THB', 'MYR', 'IDR', 'PHP',
   'VND', 'ZAR', 'BRL', 'ARS', 'CLP', 'COP', 'PEN', 'PLN', 'CZK', 'HUF', 'RON',

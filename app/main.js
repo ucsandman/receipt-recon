@@ -7,9 +7,10 @@
 
 import * as pdfjsLib from '../vendor/pdf.min.mjs';
 import { extractReceipt, clampScale } from './extract.js';
-import { mapHeaders, normalizeDate, toNumber } from './sheet.js';
+import { mapHeaders, normalizeDate, toNumber, pickTransactionSheet } from './sheet.js';
 import { auditAll, DEFAULT_POLICY } from './rules.js';
-import { buildWorkbook, downloadWorkbook, runHash } from './report.js';
+import { parseBudgetSheet, pickBudgetSheet, reconcileBudget } from './budget.js';
+import { buildWorkbook, downloadWorkbook, runHash, sumsByCurrency } from './report.js';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -21,6 +22,11 @@ const state = {
   receipts: new Map(),   // lowercased filename -> File
   rows: [],
   results: [],
+  sheets: [],            // every sheet of the workbook, as {name, aoa}
+  txnSheetIndex: -1,
+  budgetSheetIndex: -1,  // -1 means no budget sheet in play
+  budgetEntries: null,
+  budgetRecon: null,
   policy: structuredClone(DEFAULT_POLICY),
   filter: 'all',
   sort: { key: null, dir: 1 },
@@ -99,16 +105,21 @@ async function getOcrWorker() {
 // Spreadsheet reading
 // --------------------------------------------------------------------------
 
-async function readSheet(file) {
+async function readWorkbook(file) {
   const buf = await file.arrayBuffer();
   const wb = XLSX.read(buf, { type: 'array' });
-  const ws = wb.Sheets[wb.SheetNames[0]];
-  const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, blankrows: false });
-  if (!aoa.length) throw new Error('That spreadsheet has no rows.');
+  return wb.SheetNames.map((name) => ({
+    name,
+    aoa: XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, raw: true, blankrows: false }),
+  }));
+}
+
+function rowsFromSheet(aoa) {
+  if (!aoa.length) throw new Error('That sheet has no rows.');
 
   const map = mapHeaders(aoa[0]);
   if (map.amount === undefined) {
-    throw new Error('Could not find an amount column. Expected a header like "Amount" or "Total".');
+    throw new Error('Could not find an amount column on that sheet. Expected a header like "Amount" or "Total".');
   }
   const pick = (r, f) => (map[f] === undefined ? null : r[map[f]] ?? null);
 
@@ -219,6 +230,9 @@ async function runAudit() {
     }
 
     state.results = auditAll(state.rows, extractions, state.policy);
+    state.budgetRecon = state.budgetEntries
+      ? reconcileBudget(state.rows, state.budgetEntries, state.policy)
+      : null;
     state.selectedTxn = null;
     setProgress(100, `Done. ${total} rows checked.`);
     renderResults();
@@ -267,16 +281,64 @@ function renderResults() {
   const exception = r.filter((x) => x.status === 'exception').length;
   const review = r.filter((x) => x.status === 'needs-review').length;
   const clean = r.filter((x) => x.status === 'clean').length;
-  const value = r.filter((x) => x.status !== 'clean').reduce((s, x) => s + (x.row.amount || 0), 0);
+  // Per currency: adding euro and dollar figures into one number labelled USD
+  // was simply false on a multi-currency report.
+  const flagged = sumsByCurrency(r, (x) => x.status !== 'clean');
+  const flaggedHtml = flagged.length
+    ? flagged.map(([cur, v]) => money(v, cur)).join('<br>')
+    : money(0, 'USD');
 
   $('tiles').innerHTML = `
     <div class="tile"><div class="n">${r.length}</div><div class="k">Transactions checked</div></div>
     <div class="tile hard"><div class="n">${exception}</div><div class="k">Exceptions</div></div>
     <div class="tile soft"><div class="n">${review}</div><div class="k">Needs review</div></div>
     <div class="tile clean"><div class="n">${clean}</div><div class="k">Clean</div></div>
-    <div class="tile"><div class="n">${money(value, 'USD')}</div><div class="k">Value flagged</div></div>`;
+    <div class="tile"><div class="n${flagged.length > 1 ? ' n-multi' : ''}">${flaggedHtml}</div><div class="k">Value flagged</div></div>`;
 
+  renderBudget();
   renderRows();
+}
+
+// Budget statuses map onto the row-status colours: over budget is an
+// exception, unverified needs a human, within budget is clean.
+const BUDGET_BADGE = {
+  ok: ['clean', 'Within budget'],
+  over: ['exception', 'Over budget'],
+  unspent: ['', 'Unspent'],
+  unverified: ['needs-review', 'Unverified'],
+};
+
+function renderBudget() {
+  const card = $('budgetCard');
+  if (!state.budgetRecon) { card.hidden = true; return; }
+  const { lines, findings } = state.budgetRecon;
+  const cell = (v, cur) => v == null ? '—' : cur ? money(v, cur) : Number(v).toFixed(2);
+
+  $('budgetBody').innerHTML = lines.map((l) => {
+    const [cls, label] = BUDGET_BADGE[l.status] ?? ['', l.status];
+    return `<tr>
+      <td>${esc(l.label)}</td>
+      <td class="mono">${esc(l.currency ?? '—')}</td>
+      <td class="right">${cell(l.budget, l.currency)}</td>
+      <td class="right">${cell(l.actual, l.currency)}</td>
+      <td class="right">${cell(l.delta, l.currency)}</td>
+      <td><span class="pill ${cls}">${label}</span></td>
+    </tr>`;
+  }).join('');
+
+  $('budgetFindings').innerHTML = findings.map((f) => `
+    <div class="finding ${esc(f.severity)}">
+      <div class="finding-head">
+        <span class="code">${esc(f.code)}</span>
+        <span class="finding-sev">${f.severity === 'hard' ? 'Exception' : 'Needs review'}</span>
+      </div>
+      <p class="finding-msg">${esc(f.message)}</p>
+    </div>`).join('');
+
+  const sheetName = state.budgetSheetIndex >= 0 ? state.sheets[state.budgetSheetIndex].name : '';
+  $('budgetMeta').textContent =
+    `Read from sheet “${sheetName}”. Each line is compared only to spend in its own currency; nothing was converted.`;
+  card.hidden = false;
 }
 
 // Sort accessors. Anything blank sorts last in BOTH directions: a missing
@@ -533,6 +595,48 @@ const POLICY_FIELDS = [
   ['staleSubmissionDays', 'Stale submission (days)'],
 ];
 
+// Every list the rules engine consults is editable here. This is how an
+// in-house policy gets taught to the tool: change the words, not the code.
+const POLICY_LIST_FIELDS = [
+  ['noReceiptCategories', 'Categories with no receipt by nature',
+    'These are never asked for a receipt, at any amount, and the list is printed into the workbook.'],
+  ['receiptAlwaysRequiredCategories', 'Categories that always need a receipt',
+    'A receipt is required at any amount, not just above the floor.'],
+  ['itemizationCategories', 'Categories that need an itemized receipt',
+    'Applies at or above the itemization threshold.'],
+  ['tipEligibleCategories', 'Tip-eligible categories',
+    'A claimed amount may exceed the printed total by the tip tolerance without being a mismatch.'],
+  ['weekendExemptCategories', 'Weekend-exempt categories',
+    'Weekend dates in these categories are not flagged.'],
+  ['alcoholKeywords', 'Alcohol keywords',
+    'Any of these words on a receipt raises POLICY_ALCOHOL.'],
+  ['personalKeywords', 'Personal-expense keywords',
+    'Any of these in the vendor or purpose raises PERSONAL_EXPENSE.'],
+];
+
+// The policy survives a reload, so an in-house policy is taught once, on this
+// computer only. Nothing is uploaded; it sits in this browser's localStorage.
+const POLICY_KEY = 'receipt-recon-policy';
+
+function savePolicy() {
+  try { localStorage.setItem(POLICY_KEY, JSON.stringify(state.policy)); } catch { /* storage blocked by policy */ }
+}
+
+function storedPolicy() {
+  try {
+    const raw = localStorage.getItem(POLICY_KEY);
+    if (!raw) return null;
+    const saved = JSON.parse(raw);
+    // Merged over the defaults, so a policy saved before a knob existed still
+    // carries that knob's default instead of dropping it.
+    const merged = structuredClone(DEFAULT_POLICY);
+    for (const [k, v] of Object.entries(saved)) {
+      if (k in merged) merged[k] = v;
+    }
+    return merged;
+  } catch { return null; }
+}
+
 function renderPolicy() {
   $('policyGrid').innerHTML = POLICY_FIELDS.map(([key, label]) => `
     <div class="policy-item">
@@ -541,33 +645,52 @@ function renderPolicy() {
     </div>`).join('') +
     Object.entries(state.policy.categoryLimits).map(([cat, v]) => `
     <div class="policy-item">
-      <label for="pc_${cat}">Limit: ${esc(cat)}</label>
-      <input id="pc_${cat}" data-cat="${esc(cat)}" type="number" step="any" value="${v}">
+      <label for="pc_${esc(cat)}">Limit: ${esc(cat)}</label>
+      <input id="pc_${esc(cat)}" data-cat="${esc(cat)}" type="number" step="any" value="${v}">
     </div>`).join('') + `
+    <div class="policy-item">
+      <label for="pc_newName">Add a category limit</label>
+      <div class="policy-addrow">
+        <input id="pc_newName" type="text" placeholder="Category">
+        <input id="pc_newValue" type="number" step="any" placeholder="Limit">
+        <button type="button" class="btn quiet small" id="pc_newAdd">Add</button>
+      </div>
+    </div>` +
+    POLICY_LIST_FIELDS.map(([key, label, hint]) => `
     <div class="policy-item wide">
-      <label for="p_noReceiptCategories">Categories with no receipt by nature</label>
-      <input id="p_noReceiptCategories" type="text"
-             value="${esc((state.policy.noReceiptCategories || []).join(', '))}">
-      <span class="policy-hint">Comma separated. These are never asked for a receipt, at any amount, and the list is printed into the workbook.</span>
-    </div>`;
+      <label for="p_${key}">${label}</label>
+      <input id="p_${key}" type="text" value="${esc((state.policy[key] || []).join(', '))}">
+      <span class="policy-hint">Comma separated. ${hint}</span>
+    </div>`).join('');
 
-  $('p_noReceiptCategories').addEventListener('change', (e) => {
-    state.policy.noReceiptCategories = e.target.value
-      .split(',').map((s) => s.trim()).filter(Boolean);
-  });
+  for (const [key] of POLICY_LIST_FIELDS) {
+    $(`p_${key}`).addEventListener('change', (e) => {
+      state.policy[key] = e.target.value.split(',').map((s) => s.trim()).filter(Boolean);
+      savePolicy();
+    });
+  }
 
   for (const [key] of POLICY_FIELDS) {
     $(`p_${key}`).addEventListener('change', (e) => {
       const n = parseFloat(e.target.value);
-      if (Number.isFinite(n)) state.policy[key] = n;
+      if (Number.isFinite(n)) { state.policy[key] = n; savePolicy(); }
     });
   }
   for (const input of $('policyGrid').querySelectorAll('input[data-cat]')) {
     input.addEventListener('change', (e) => {
       const n = parseFloat(e.target.value);
-      if (Number.isFinite(n)) state.policy.categoryLimits[e.target.dataset.cat] = n;
+      if (Number.isFinite(n)) { state.policy.categoryLimits[e.target.dataset.cat] = n; savePolicy(); }
     });
   }
+  $('pc_newAdd').addEventListener('click', () => {
+    const cat = $('pc_newName').value.trim();
+    const n = parseFloat($('pc_newValue').value);
+    if (!cat || !Number.isFinite(n)) return;
+    state.policy.categoryLimits[cat] = n;
+    savePolicy();
+    renderPolicy();          // the new limit appears as its own editable field
+    $('pc_newName').focus();
+  });
 }
 
 // --------------------------------------------------------------------------
@@ -582,14 +705,78 @@ async function acceptSheet(file) {
   state.sheetFile = file;
   state.reportName = file.name;
   try {
-    state.rows = await readSheet(file);
-    $('statusSheet').textContent = `${file.name} · ${state.rows.length} rows`;
-    $('dropSheet').classList.add('filled');
+    state.sheets = await readWorkbook(file);
+    const txn = pickTransactionSheet(state.sheets);
+    if (txn === -1) {
+      throw new Error('Could not find a sheet with an amount column. Expected a header like "Amount" or "Total".');
+    }
+    state.txnSheetIndex = txn;
+    state.budgetSheetIndex = pickBudgetSheet(state.sheets, txn);
+    applySheetSelection();
     clearBanner();
   } catch (err) {
     state.rows = [];
+    state.sheets = [];
+    state.budgetEntries = null;
+    $('sheetChoice').hidden = true;
     $('statusSheet').textContent = 'Could not read that file';
     $('dropSheet').classList.remove('filled');
+    showBanner(err.message);
+  }
+  updateRunButton();
+}
+
+/** Re-derive rows and budget from the currently selected sheets, and say in
+ *  the drop status exactly which sheet is being audited against which budget,
+ *  so a wrong guess is visible before the run rather than after it. */
+function applySheetSelection() {
+  const txnSheet = state.sheets[state.txnSheetIndex];
+  state.rows = rowsFromSheet(txnSheet.aoa);
+  const parsed = state.budgetSheetIndex >= 0
+    ? parseBudgetSheet(state.sheets[state.budgetSheetIndex].aoa)
+    : null;
+  state.budgetEntries = parsed?.entries ?? null;
+
+  renderSheetChoice();
+  const bits = [`${state.reportName} · ${state.rows.length} rows`];
+  if (state.sheets.length > 1) bits.push(`from “${txnSheet.name}”`);
+  if (state.budgetEntries) {
+    bits.push(`budget: ${state.budgetEntries.length} line${state.budgetEntries.length === 1 ? '' : 's'}`);
+  }
+  $('statusSheet').textContent = bits.join(' · ');
+  $('dropSheet').classList.add('filled');
+}
+
+function renderSheetChoice() {
+  const box = $('sheetChoice');
+  if (state.sheets.length < 2) { box.hidden = true; return; }
+
+  const options = (selected, skip = -1) => state.sheets.map((s, i) =>
+    i === skip ? '' :
+    `<option value="${i}"${i === selected ? ' selected' : ''}>${esc(s.name)}</option>`).join('');
+  $('selTxnSheet').innerHTML = options(state.txnSheetIndex);
+  $('selBudgetSheet').innerHTML =
+    `<option value="-1"${state.budgetSheetIndex === -1 ? ' selected' : ''}>None</option>` +
+    options(state.budgetSheetIndex, state.txnSheetIndex);
+
+  const hint = $('budgetHint');
+  if (state.budgetSheetIndex >= 0 && !state.budgetEntries) {
+    hint.textContent = `No budget table was found on “${state.sheets[state.budgetSheetIndex].name}”. It needs a label column (like Category) and a budget column.`;
+  } else if (state.budgetEntries) {
+    hint.textContent = 'The report will be reconciled against this budget, each line in its own currency.';
+  } else {
+    hint.textContent = '';
+  }
+  box.hidden = false;
+}
+
+function changeSheetSelection() {
+  try {
+    applySheetSelection();
+    clearBanner();
+  } catch (err) {
+    state.rows = [];
+    $('statusSheet').textContent = 'That sheet does not hold the transactions';
     showBanner(err.message);
   }
   updateRunButton();
@@ -722,11 +909,23 @@ async function loadSample() {
 
 function init() {
   applyTheme(storedTheme());
+  const saved = storedPolicy();
+  if (saved) state.policy = saved;
   for (const b of document.querySelectorAll('.themebtn')) {
     b.addEventListener('click', () => applyTheme(b.dataset.themeValue));
   }
 
   $('fileSheet').addEventListener('change', (e) => e.target.files[0] && acceptSheet(e.target.files[0]));
+  $('selTxnSheet').addEventListener('change', (e) => {
+    state.txnSheetIndex = Number(e.target.value);
+    // The transaction sheet cannot double as the budget sheet.
+    if (state.budgetSheetIndex === state.txnSheetIndex) state.budgetSheetIndex = -1;
+    changeSheetSelection();
+  });
+  $('selBudgetSheet').addEventListener('change', (e) => {
+    state.budgetSheetIndex = Number(e.target.value);
+    changeSheetSelection();
+  });
   // A folder pick replaces the set; a drop adds to it.
   $('fileReceipts').addEventListener('change', (e) => acceptReceipts([...e.target.files], { replace: true }));
   $('btnClearReceipts').addEventListener('click', clearReceipts);
@@ -744,6 +943,7 @@ function init() {
   });
   $('btnPolicyReset').addEventListener('click', () => {
     state.policy = structuredClone(DEFAULT_POLICY);
+    try { localStorage.removeItem(POLICY_KEY); } catch { /* storage blocked by policy */ }
     renderPolicy();
   });
 
@@ -781,9 +981,14 @@ function init() {
     btn.textContent = 'Building workbook…';
     try {
       const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
-      const hash = await runHash(state.results, state.policy);
+      const budget = state.budgetRecon ? {
+        ...state.budgetRecon,
+        sheetName: state.budgetSheetIndex >= 0 ? state.sheets[state.budgetSheetIndex].name : '',
+      } : null;
+      const hash = await runHash(state.results, state.policy, state.budgetRecon);
       const wb = buildWorkbook(XLSX, state.results, {
         hash,
+        budget,
         policy: state.policy,
         generatedAt: new Date().toISOString().slice(0, 19).replace('T', ' '),
         reportName: state.reportName,
