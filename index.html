@@ -170,8 +170,16 @@
     </p>
     <div class="policygrid" id="policyGrid"></div>
     <div class="actions">
+      <button class="btn quiet" id="btnPolicySave">Save policy file</button>
+      <button class="btn quiet" id="btnPolicyLoad">Load policy file</button>
       <button class="btn quiet" id="btnPolicyReset">Reset to defaults</button>
+      <!-- .sr-only, not [hidden], for the same keyboard reason as the pickers above. -->
+      <input type="file" id="filePolicy" accept=".json,application/json" class="sr-only" aria-label="Choose a saved policy file">
     </div>
+    <p class="microcopy">
+      A saved policy file is plain JSON you can keep in version control and hand to a
+      colleague. Loading one replaces every setting above, after the file is checked.
+    </p>
   </section>
 
   <!-- ================= STEP 2 ================= -->

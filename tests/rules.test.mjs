@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url';
 
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { extractReceipt } from '../app/extract.js';
-import { auditAll, vendorSimilarity, DEFAULT_POLICY, SEVERITY } from '../app/rules.js';
+import { auditAll, vendorSimilarity, sanitizePolicy, DEFAULT_POLICY, SEVERITY } from '../app/rules.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TRUTH = JSON.parse(fs.readFileSync(path.join(ROOT, 'sample-data/ground-truth.json'), 'utf8'));
@@ -260,6 +260,50 @@ test('a real currency mismatch still outranks the unverified signal', () => {
   assert.ok(codes(r).includes('CURRENCY_MISMATCH'));
   assert.ok(!codes(r).includes('CURRENCY_UNVERIFIED'),
     'a known mismatch is not an unverified one');
+});
+
+// ---------------------------------------------------------------------------
+// sanitizePolicy: the gate a loaded policy file passes through. A mistyped
+// digit in a hand-edited file must be refused loudly, never applied silently.
+// ---------------------------------------------------------------------------
+
+test('a saved policy round-trips through sanitizePolicy unchanged', () => {
+  const raw = JSON.parse(JSON.stringify(DEFAULT_POLICY));
+  const { policy, errors } = sanitizePolicy(raw);
+  assert.deepEqual(errors, []);
+  assert.deepEqual(policy, DEFAULT_POLICY);
+});
+
+test('a string where a number belongs is refused by name and the default kept', () => {
+  const { policy, errors } = sanitizePolicy({ receiptRequiredAtOrAbove: 'high' });
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /receiptRequiredAtOrAbove/);
+  assert.equal(policy.receiptRequiredAtOrAbove, DEFAULT_POLICY.receiptRequiredAtOrAbove);
+});
+
+test('a bare string where a word list belongs is refused', () => {
+  const { policy, errors } = sanitizePolicy({ alcoholKeywords: 'wine' });
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /alcoholKeywords/);
+  assert.deepEqual(policy.alcoholKeywords, DEFAULT_POLICY.alcoholKeywords);
+});
+
+test('a category limit that is not a number is refused', () => {
+  const { errors } = sanitizePolicy({ categoryLimits: { Meals: 'lots' } });
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /categoryLimits/);
+});
+
+test('unknown keys are ignored without complaint', () => {
+  const { policy, errors } = sanitizePolicy({ bogus: 1 });
+  assert.deepEqual(errors, []);
+  assert.equal('bogus' in policy, false);
+});
+
+test('list items are coerced to trimmed strings and empties dropped', () => {
+  const { policy, errors } = sanitizePolicy({ alcoholKeywords: [' wine ', '', 'mead'] });
+  assert.deepEqual(errors, []);
+  assert.deepEqual(policy.alcoholKeywords, ['wine', 'mead']);
 });
 
 test('policy thresholds are configurable, not hardcoded', async () => {

@@ -65,6 +65,57 @@ export const DEFAULT_POLICY = {
   flagRoundAmountsAtOrAbove: 100.00,
 };
 
+/** Validate a policy object loaded from a file against the shape of
+ *  DEFAULT_POLICY. The types come from the defaults themselves: a number stays
+ *  a number, a word list stays an array of strings, a limits table stays a map
+ *  of category to number. Anything else is refused BY NAME, because the policy
+ *  is hashed and printed into the workbook: a silently coerced value would make
+ *  a filed report claim thresholds nobody chose.
+ *
+ *  Returns { policy, errors }. policy always starts from the defaults, so a
+ *  file saved before a knob existed still carries that knob's default.
+ *  Unknown keys are ignored: they are harmless and refusing them would make
+ *  every future version reject every older file. */
+export function sanitizePolicy(raw) {
+  const policy = structuredClone(DEFAULT_POLICY);
+  const errors = [];
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { policy, errors: ['The file does not hold a policy object.'] };
+  }
+  for (const [key, def] of Object.entries(DEFAULT_POLICY)) {
+    if (!(key in raw)) continue;
+    const v = raw[key];
+    if (typeof def === 'number') {
+      if (typeof v === 'number' && Number.isFinite(v)) policy[key] = v;
+      else errors.push(`${key} must be a number, got ${Array.isArray(v) ? 'array' : typeof v}.`);
+    } else if (Array.isArray(def)) {
+      if (Array.isArray(v)) policy[key] = v.map((x) => String(x).trim()).filter(Boolean);
+      else errors.push(`${key} must be a list, got ${typeof v}.`);
+    } else if (typeof def === 'string') {
+      if (typeof v === 'string' && v.trim()) policy[key] = v.trim();
+      else errors.push(`${key} must be a short text value, got ${typeof v}.`);
+    } else if (def !== null && typeof def === 'object') {
+      // A table of name -> number (categoryLimits, fxRates).
+      if (v !== null && typeof v === 'object' && !Array.isArray(v)) {
+        const clean = {};
+        let bad = false;
+        for (const [k, n] of Object.entries(v)) {
+          if (typeof n === 'number' && Number.isFinite(n) && String(k).trim()) {
+            clean[String(k).trim()] = n;
+          } else {
+            errors.push(`${key}.${k} must be a number, got ${typeof n}.`);
+            bad = true;
+          }
+        }
+        if (!bad) policy[key] = clean;
+      } else {
+        errors.push(`${key} must be a table of names and numbers, got ${Array.isArray(v) ? 'array' : typeof v}.`);
+      }
+    }
+  }
+  return { policy, errors };
+}
+
 // Severity drives how the report sorts and what an auditor must action.
 //   hard   a rule was violated; requires a decision before sign-off
 //   soft   a risk signal; worth a look, not a finding on its own

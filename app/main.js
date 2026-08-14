@@ -8,7 +8,7 @@
 import * as pdfjsLib from '../vendor/pdf.min.mjs';
 import { extractReceipt, clampScale } from './extract.js';
 import { mapHeaders, normalizeDate, toNumber, pickTransactionSheet } from './sheet.js';
-import { auditAll, DEFAULT_POLICY } from './rules.js';
+import { auditAll, sanitizePolicy, DEFAULT_POLICY } from './rules.js';
 import { parseBudgetSheet, pickBudgetSheet, reconcileBudget } from './budget.js';
 import { buildWorkbook, downloadWorkbook, runHash, sumsByCurrency } from './report.js';
 
@@ -622,6 +622,38 @@ function savePolicy() {
   try { localStorage.setItem(POLICY_KEY, JSON.stringify(state.policy)); } catch { /* storage blocked by policy */ }
 }
 
+/** Download a small text file. Used for the policy file and the review
+ *  session: both are explicit user actions, mirroring the workbook download. */
+function downloadTextFile(filename, text, type = 'application/json') {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+/** The explicit half of policy persistence: a file the user can keep in
+ *  version control, diff, and hand to a colleague. The localStorage mirror
+ *  below stays; this is for moving the policy between machines and months. */
+function loadPolicyFile(file) {
+  file.text().then((text) => {
+    let raw;
+    try { raw = JSON.parse(text); }
+    catch { showBanner(`"${file.name}" is not valid JSON, so the policy was not changed.`); return; }
+    const { policy, errors } = sanitizePolicy(raw);
+    if (errors.length) {
+      showBanner(`"${file.name}" was refused: ${errors[0]} The policy was not changed.`);
+      return;
+    }
+    state.policy = policy;
+    savePolicy();
+    renderPolicy();
+    clearBanner();
+    announce('Policy loaded from file.');
+  }).catch(() => showBanner(`"${file.name}" could not be read.`));
+}
+
 function storedPolicy() {
   try {
     const raw = localStorage.getItem(POLICY_KEY);
@@ -940,6 +972,15 @@ function init() {
     panel.hidden = !panel.hidden;
     $('btnPolicy').setAttribute('aria-expanded', String(!panel.hidden));
     if (!panel.hidden) renderPolicy();
+  });
+  $('btnPolicySave').addEventListener('click', () => {
+    downloadTextFile('receipt-recon-policy.json', JSON.stringify(state.policy, null, 2));
+    announce('Policy file downloaded.');
+  });
+  $('btnPolicyLoad').addEventListener('click', () => $('filePolicy').click());
+  $('filePolicy').addEventListener('change', (e) => {
+    if (e.target.files[0]) loadPolicyFile(e.target.files[0]);
+    e.target.value = '';   // so loading the same file again still fires change
   });
   $('btnPolicyReset').addEventListener('click', () => {
     state.policy = structuredClone(DEFAULT_POLICY);
