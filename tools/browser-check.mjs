@@ -159,7 +159,7 @@ fs.writeFileSync(path.join(corruptDir, victim), Buffer.from('%PDF-1.4\nthis is n
 
 await page.setInputFiles('#fileReceipts', corruptDir);
 await page.waitForFunction(
-  (n) => new RegExp(`^${n} PDFs loaded`).test(document.getElementById('statusReceipts').textContent),
+  (n) => new RegExp(`^${n} receipts loaded`).test(document.getElementById('statusReceipts').textContent),
   fs.readdirSync(corruptDir).length);
 // The previous run already left "Done." in the progress text, so waiting for it
 // would return before this run had even started. Stamp a sentinel first.
@@ -284,6 +284,45 @@ assert.ok(budBack.recon.some((r) => r[0] === 'Meals' && r[5] === 'OVER BUDGET'),
 ok('audit workbook carries a Budget Recon tab with the overrun');
 fs.rmSync(fixtureDir, { recursive: true, force: true });
 
+// ---- the FX view: typed rates produce a labelled estimate, nothing more --
+await page.click('#btnPolicy');
+await page.fill('#fx_newCode', 'EUR');
+await page.fill('#fx_newRate', '1.08');
+await page.click('#fx_newAdd');
+await page.waitForSelector('#budgetFx:not([hidden])');
+const fxText = await page.locator('#budgetFx').innerText();
+assert.match(fxText, /1 EUR = 1\.08 USD/, 'the applied rate is printed');
+assert.match(fxText, /at your stated rates/i);
+assert.match(fxText, /nothing was converted there/i, 'the caveat is part of the view');
+// The findings above the view must be untouched: still per-currency.
+assert.ok((await page.locator('#budgetFindings').innerText()).includes('BUDGET_CURRENCY_UNMATCHED'),
+  'typed rates must not absorb the cross-currency finding');
+ok('FX view renders at stated rates, findings stay conversion-free');
+// Clearing the rate removes the view.
+await page.fill('#fx_EUR', '');
+await page.locator('#policyGrid').click();   // blur fires the change
+await page.waitForSelector('#budgetFx[hidden]', { state: 'attached' });
+await page.click('#btnPolicy');
+ok('clearing the rate removes the converted view');
+
+// ---- column mapping: a corrected guess drives the audit ------------------
+const colmap = await page.evaluate(() => ({
+  visible: !document.getElementById('colMap').hidden,
+  vendor: document.getElementById('cm_vendor')?.value,
+}));
+assert.equal(colmap.visible, true, 'the columns disclosure should render for a loaded sheet');
+assert.equal(colmap.vendor, '3', 'Vendor should be auto-bound to column D');
+await page.click('#colMap summary');          // open the disclosure
+await page.selectOption('#cm_vendor', '4');   // point Vendor at the Category column
+await page.evaluate(() => { document.getElementById('progText').textContent = 'rerunning'; });
+await page.click('#btnRun');
+await page.waitForFunction(() => /^Done\./.test(document.getElementById('progText').textContent),
+  null, { timeout: 60000 });
+const remappedVendor = await page.evaluate(() =>
+  document.querySelector('#resultBody tr[data-txn="B-1"] td:nth-child(3)').textContent.trim());
+assert.equal(remappedVendor, 'Meals', 'the audit must read Vendor from the corrected column');
+ok('column mapping override feeds the audit: Vendor cell shows the remapped column');
+
 // ---- the policy editor teaches an in-house policy ------------------------
 await page.click('#btnPolicy');
 const policyUi = await page.evaluate(() => ({
@@ -295,6 +334,165 @@ assert.deepEqual(policyUi.lists, [true, true, true], 'keyword and category lists
 assert.ok(policyUi.addRow, 'a new category limit can be added');
 ok('policy editor exposes the keyword lists and category limits');
 await page.click('#btnPolicy');
+
+// ---- policy file: save, reset, load restores; a bad file is refused ------
+await page.click('#btnPolicy');
+await page.fill('#p_receiptRequiredAtOrAbove', '25');
+await page.locator('#p_receiptRequiredAtOrAbove').blur();
+const polDir = fs.mkdtempSync(path.join(os.tmpdir(), 'recon-policy-'));
+const [polDownload] = await Promise.all([
+  page.waitForEvent('download', { timeout: 30000 }),
+  page.click('#btnPolicySave'),
+]);
+const polFile = path.join(polDir, 'policy.json');
+await polDownload.saveAs(polFile);
+await page.click('#btnPolicyReset');
+assert.equal(await page.inputValue('#p_receiptRequiredAtOrAbove'), '75');
+await page.setInputFiles('#filePolicy', polFile);
+await page.waitForFunction(() => document.getElementById('p_receiptRequiredAtOrAbove').value === '25');
+ok('policy file round-trips: save at 25, reset to 75, load restores 25');
+
+const badPolicy = path.join(polDir, 'bad-policy.json');
+fs.writeFileSync(badPolicy, JSON.stringify({ receiptRequiredAtOrAbove: 'high' }));
+await page.setInputFiles('#filePolicy', badPolicy);
+await page.waitForSelector('#banner');
+assert.match(await page.locator('#banner').innerText(), /receiptRequiredAtOrAbove/);
+assert.equal(await page.inputValue('#p_receiptRequiredAtOrAbove'), '25',
+  'a refused policy file must not change the live policy');
+ok('a policy file with a string where a number belongs is refused by name');
+await page.click('#btnPolicyReset');
+await page.click('#btnPolicy');
+fs.rmSync(polDir, { recursive: true, force: true });
+
+// ---- the full monthly workflow: photos, statement, decisions -------------
+// A fresh page state: sample sheet via the file input, receipts from a folder
+// that carries one PNG photo and one non-receipt file, plus a statement CSV
+// with one charge that was never expensed.
+await page.goto(BASE, { waitUntil: 'networkidle' });
+
+const wfDir = fs.mkdtempSync(path.join(os.tmpdir(), 'recon-workflow-'));
+const wfReceipts = path.join(wfDir, 'receipts');
+fs.mkdirSync(wfReceipts);
+for (const name of fs.readdirSync(receiptDir)) {
+  if (name === 'TX-1000.pdf') continue;   // this row's receipt becomes a photo
+  fs.copyFileSync(path.join(receiptDir, name), path.join(wfReceipts, name));
+}
+{
+  // Paint the photo with the row's real receipt values, so the audit result
+  // for TX-1000 stays what the answer key expects.
+  const t1000 = TRUTH.transactions.find((t) => t.txn_id === 'TX-1000');
+  const b64 = await page.evaluate(({ vendor, total, date }) => {
+    const c = document.createElement('canvas');
+    c.width = 900; c.height = 620;
+    const g = c.getContext('2d');
+    g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+    g.fillStyle = '#000'; g.font = 'bold 40px Arial';
+    g.fillText(vendor, 60, 100);
+    g.font = '34px Arial';
+    g.fillText(date, 60, 200);
+    g.fillText(`TOTAL $${total.toFixed(2)}`, 60, 300);
+    return c.toDataURL('image/png').split(',')[1];
+  }, { vendor: t1000.receipt_vendor, total: t1000.receipt_total, date: t1000.receipt_date });
+  fs.writeFileSync(path.join(wfReceipts, 'TX-1000.png'), Buffer.from(b64, 'base64'));
+}
+fs.writeFileSync(path.join(wfReceipts, 'notes.docx'), 'not a receipt');
+
+// Statement: the first five charges (posted a day late, debit-negative), one
+// payment line, one charge that never became an expense row.
+const plusDays = (iso, n) =>
+  new Date(Date.parse(iso + 'T00:00:00Z') + n * 86400000).toISOString().slice(0, 10);
+const stmtLines = ['Posting Date,Description,Amount'];
+for (const t of TRUTH.transactions.slice(0, 5)) {
+  stmtLines.push(`${plusDays(t.sheet_date, 1)},"${t.sheet_vendor.toUpperCase()}",-${t.sheet_amount}`);
+}
+stmtLines.push('2026-07-20,"PAYMENT THANK YOU",500.00');
+stmtLines.push('2026-07-11,"VISTAPRINT BANNER SHOP",-999.99');
+const stmtCsv = path.join(wfDir, 'statement.csv');
+fs.writeFileSync(stmtCsv, stmtLines.join('\n'));
+
+const wfSheet = path.join(wfDir, 'expense-report.xlsx');
+fs.copyFileSync('sample-data/expense-report.xlsx', wfSheet);
+
+await page.setInputFiles('#fileSheet', wfSheet);
+await page.waitForFunction(() => !document.getElementById('btnRun').disabled);
+await page.setInputFiles('#fileReceipts', wfReceipts);
+await page.setInputFiles('#fileStatement', stmtCsv);
+await page.waitForFunction(() =>
+  /charge/.test(document.getElementById('statusStatement').textContent));
+assert.match(await page.locator('#statusReceipts').innerText(), /ignored: notes\.docx/,
+  'non-receipt files must be reported ignored BY NAME');
+ok('a non-receipt file in the folder is reported ignored by name');
+
+await page.click('#btnRun');
+await page.waitForFunction(() => /^Done\./.test(document.getElementById('progText').textContent),
+  null, { timeout: 180000 });
+
+// The photo row reads via OCR and matches its planted receipt values.
+const photoRow = await page.evaluate(() => {
+  const tr = document.querySelector('#resultBody tr[data-txn="TX-1000"]');
+  return { readBy: tr.children[6].textContent.trim(), status: tr.querySelector('.pill').textContent.trim() };
+});
+assert.match(photoRow.readBy, /^OCR/, `TX-1000 should read via OCR, got ${photoRow.readBy}`);
+ok(`a PNG receipt photo resolves and reads via the OCR tier (${photoRow.readBy})`);
+
+// The statement card: exactly the planted unclaimed charge, nothing else.
+const stmtUi = await page.evaluate(() => ({
+  visible: !document.getElementById('stmtCard').hidden,
+  unclaimed: [...document.querySelectorAll('#stmtBody tr')].map((tr) => tr.textContent),
+  softCount: document.getElementById('resultBody').textContent.split('CLAIMED_NOT_ON_STATEMENT').length - 1,
+}));
+assert.equal(stmtUi.visible, true);
+assert.equal(stmtUi.unclaimed.length, 1, 'exactly one statement charge was never expensed');
+assert.match(stmtUi.unclaimed[0], /VISTAPRINT/);
+assert.equal(stmtUi.softCount, TRUTH.transactions.length - 5,
+  'every expense row without a statement charge behind it is flagged soft');
+ok('statement reconciliation: 5 matched, the never-expensed charge surfaced as UNCLAIMED_CHARGE');
+
+// A reviewer decision, made in the drawer, lands in the workbook — and the
+// run hash printed in the Summary is byte-identical before and after, because
+// a human's verdict is not an input to what was audited.
+const readWorkbookHash = async () => {
+  const [dl] = await Promise.all([
+    page.waitForEvent('download', { timeout: 60000 }),
+    page.click('#btnDownload'),
+  ]);
+  const f = path.join(wfDir, `wb-${Date.now()}.xlsx`);
+  await dl.saveAs(f);
+  return await page.evaluate((b64) => {
+    const wb = XLSX.read(b64, { type: 'base64' });
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets['Summary'], { header: 1 });
+    return {
+      tabs: wb.SheetNames,
+      hash: rows.find((r) => r[0] === 'Run hash (SHA-256)')?.[1],
+      byEmployee: rows.some((r) => r[0] === 'By employee'),
+      exceptions: XLSX.utils.sheet_to_json(wb.Sheets['Exceptions'], { header: 1 }),
+    };
+  }, fs.readFileSync(f).toString('base64'));
+};
+
+const before = await readWorkbookHash();
+assert.ok(before.tabs.includes('Statement Recon'), `workbook tabs: ${before.tabs.join(', ')}`);
+assert.ok(before.byEmployee, 'Summary should carry the By employee block');
+ok('workbook carries the Statement Recon tab and the per-employee breakdown');
+
+await page.fill('#reviewerName', 'Browser Check');
+await page.click('.chip[data-filter="exception"]');   // a clean row has nothing to decide
+await page.click('#resultBody tr[data-txn] .rowbtn');
+await page.waitForSelector('#panel:not([hidden])');
+await page.locator('.decide-btn[data-decision="approved"]').first().click();
+const decidedCode = await page.locator('#panelFindings .code').first().innerText();
+await page.locator('.decide-note').first().fill('checked in browser test');
+await page.locator('.decide-note').first().blur();
+await page.keyboard.press('Escape');
+
+const after = await readWorkbookHash();
+assert.equal(after.hash, before.hash, 'a reviewer decision must never move the run hash');
+const decidedRow = after.exceptions.find((r) => r[2] === decidedCode && r[10] === 'Approved');
+assert.ok(decidedRow, `Exceptions tab should carry the Approved decision for ${decidedCode}`);
+assert.equal(decidedRow[11], 'Browser Check');
+assert.equal(decidedRow[13], 'checked in browser test');
+ok(`reviewer decision on ${decidedCode} filled the sign-off columns; run hash unmoved`);
+fs.rmSync(wfDir, { recursive: true, force: true });
 
 // ---- the privacy claim ---------------------------------------------------
 assert.deepEqual(externalRequests, [],

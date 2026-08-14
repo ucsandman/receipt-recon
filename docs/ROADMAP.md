@@ -9,6 +9,8 @@ on separate and deliberately conflicting lenses.
 
 **Status.** All eight ship-now items landed on 2026-08-12 in commit ec9db7a, each with the check its entry asked for. Test suites went from 19 unit, 14 browser and 17 accessibility assertions to 37, 15 and 22.
 
+**Status 2026-08-14.** Items 10, 11, 14, 15, 17, 19, 20 and 27 landed on branch `roadmap-batch`, each with its proof-it-shipped check. Deviations from the entries as written: #27 was built as the brainstormed disclosed-view variant (rates feed only a labelled "at your stated rates" budget estimate; the amount check stays conversion-free), and #20's persistence question was answered with an explicit session file rather than localStorage. #19's demanded design spec (tolerances, severities, sign handling) is recorded in docs/DECISIONS.md. Unit tests 37 → 87.
+
 | | Count |
 | --- | --- |
 | Ship now | 8 |

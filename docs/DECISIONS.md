@@ -5,6 +5,53 @@ what was rejected, the date.
 
 ---
 
+## Statement reconciliation: named tolerances, HARD/SOFT split, no bank API
+
+**Date:** 2026-08-14
+
+**Decision.** Roadmap #19 shipped local-file only. The design spec it demanded:
+a statement charge matches an expense row when amounts agree within
+`amountToleranceAbs` and dates within `statementDateToleranceDays` (default 5,
+editable), same currency when both sides state one, one-to-one matching with
+smallest date gap winning and vendor similarity only as a tiebreak (issuer
+descriptors like "SQ *COFFEE SHOP" are too mangled to require a name match).
+Amounts compare as absolute values because issuers disagree on sign; payment
+lines are skipped by keyword and the skip count disclosed. An unmatched charge
+is `UNCLAIMED_CHARGE` at HARD, report-level — unreported spend is the blind spot
+the Methodology tab used to admit. An unmatched expense row is
+`CLAIMED_NOT_ON_STATEMENT` at SOFT, on the row — cash or a personal card is an
+innocent explanation. Parsed statement lines join the run-hash material when
+present. **Rejected:** any live bank connection (Plaid/OAuth), and HARD severity
+for rows missing from the statement.
+
+## Reviewer decisions persist as an explicit session file, never localStorage
+
+**Date:** 2026-08-14
+
+**Decision.** Roadmap #20's open question. Decisions live in memory, export to
+and reload from a JSON session file carrying the run hash, and are refused
+per-entry when they match no finding in the current run (hash mismatch warns).
+They stay out of the run hash: the hash proves what was audited, and a human's
+verdict is not an input to that. **Rejected:** localStorage auto-restore —
+silently keeping review verdicts on a shared corporate laptop contradicts the
+"nothing is retained" posture, the same reasoning that trimmed policy
+persistence in roadmap #14.
+
+## FX rates the user types feed a labelled estimate view only
+
+**Date:** 2026-08-14
+
+**Decision.** Roadmap #27 shipped as the disclosed-view variant: `fxRates` /
+`fxBase` in the policy produce an "at your stated rates" block on the budget
+card and workbook, with the rates printed beside the converted totals. Findings,
+budget lines and every comparison stay strictly per-currency. **Rejected:** the
+original proposal of converting inside the amount check — a hand-typed rate
+rarely reconciles to the penny against the card's real conversion, so it would
+manufacture mismatches of its own. RULESET_VERSION bumped 1.0.0 → 1.1.0 because
+the policy object is hash material and gained keys.
+
+---
+
 ## Browser-only, zero-install, over a Python pipeline
 
 **Date:** 2026-08-12

@@ -100,6 +100,11 @@ Every rule is deterministic and every threshold is editable in the UI.
 - `BUDGET_CURRENCY_AMBIGUOUS` — a budget line with no stated currency over spend in several currencies; unverifiable, and says so
 - `BUDGET_UNBUDGETED_SPEND` — spend in a category the budget never mentions
 
+**Card-statement reconciliation**, when you drop in the month's card export (optional, local file only — no bank connection)
+- `UNCLAIMED_CHARGE` — a statement charge with no matching expense row at all: spend that was never reported. This used to be the tool's biggest declared blind spot
+- `CLAIMED_NOT_ON_STATEMENT` — an expense row with no charge behind it. Soft, because cash or a personal card is an innocent explanation
+- Matching is one-to-one, within a named date tolerance (default 5 days, editable) and the amount tolerance; amounts are compared as absolute values because card exports disagree on sign, and payment lines are skipped and disclosed
+
 **Patterns across the whole batch** (invisible to any per-row check)
 - `DUPLICATE_RECEIPT` — the same PDF cited by two rows; both get flagged, because the tool cannot know which is the original
 - `DUPLICATE_CHARGE` — same vendor, date and amount claimed twice under different receipts
@@ -110,14 +115,15 @@ Every rule is deterministic and every threshold is editable in the UI.
 
 ## What you get
 
-An `.xlsx` with four tabs, five when a budget was reconciled:
+An `.xlsx` with four tabs, plus one each when a budget or a card statement was reconciled:
 
 | Tab | What's in it |
 | --- | --- |
-| **Summary** | Counts, value flagged per currency, findings by rule, and a SHA-256 run hash |
+| **Summary** | Counts, value flagged per currency, findings by rule, a per-employee breakdown sorted by flagged value, and a SHA-256 run hash |
 | **Audit Detail** | Every transaction, not just the problems, with how each receipt was read and at what confidence |
-| **Exceptions** | One row per finding, with the triggering value, the threshold, and blank **reviewer decision / reviewer / date / note** columns |
-| **Budget Recon** | Each budget line against actual spend in its own currency, with the overruns and everything that could not be verified |
+| **Exceptions** | One row per finding, with the triggering value, the threshold, and the **reviewer decision / reviewer / date / note** columns — pre-filled with the decisions you made in the evidence drawer, blank where the item is still open |
+| **Budget Recon** | Each budget line against actual spend in its own currency, with the overruns and everything that could not be verified. If you typed FX rates into the policy panel, a clearly labelled "at your stated rates" estimate is appended — findings never use it |
+| **Statement Recon** | The matching rule with its tolerances, every unclaimed charge, and the rows with no charge behind them |
 | **Methodology** | The ruleset version, every threshold applied, and an explicit list of what was *not* verified |
 
 The run hash is the reproducibility proof: same report, same receipts, same policy,
@@ -147,14 +153,30 @@ python tools/make_sample_data.py --count 350
    sheet holding the transactions is found automatically, and if the workbook has
    a budget or cover sheet (a table with a category column and a budget column,
    in one currency or several), it is picked up and reconciled against the
-   report. Both guesses are shown as dropdowns you can override.
-3. Drop in the receipts folder. Files are matched by the receipt-file column, falling
-   back to matching on the transaction ID.
-4. Adjust **Policy settings** to your own thresholds and word lists — category
+   report. Both guesses are shown as dropdowns you can override — and **Columns
+   we found** shows exactly which column feeds each field, with a dropdown per
+   field to correct a wrong guess. Corrections are remembered on this computer
+   for files with the same header row, so a monthly export is fixed once.
+3. Drop in the receipts folder. PDFs and phone photos (`.jpg`, `.jpeg`, `.png`,
+   `.webp`) both work; photos are read by the OCR tier. Files are matched by the
+   receipt-file column, falling back to matching on the transaction ID. Anything
+   that is not a receipt is reported ignored, by name.
+4. Optionally drop in the month's **card statement** export (`.xlsx` or `.csv`,
+   downloaded by you — the tool never connects to a bank). Charges that were
+   never expensed and expense rows with no charge behind them both surface.
+5. Adjust **Policy settings** to your own thresholds and word lists — category
    limits, alcohol and personal-expense keywords, receipt-exempt categories, all
    of it. Your policy is remembered in this browser (never uploaded), so an
-   in-house policy is taught once.
-5. **Run the audit**, then download the workbook.
+   in-house policy is taught once. **Save policy file** writes it to a plain
+   JSON file you can keep in version control or hand to a colleague; **Load
+   policy file** applies one, after checking every value's type. You can also
+   type month-end FX rates: they feed only a clearly labelled "at your stated
+   rates" estimate under the budget card — no finding ever converts a currency.
+6. **Run the audit.** Review each finding in the evidence drawer: Approve,
+   Reject or Needs-follow-up, with a note. Decisions land in the workbook's
+   Exceptions tab, and **Save review session** keeps them as a file you can
+   reload later — they are deliberately not stored in the browser.
+7. Download the workbook.
 
 Roughly a minute for 350 transactions when most have a text layer, longer if many
 need OCR.
@@ -179,8 +201,13 @@ light or dark from the top bar.
 
 Read these before relying on it.
 
-- **No bank or card statement is compared.** Only the report and its attachments. A
-  charge that exists with no row at all is invisible to this tool.
+- **The card statement is compared only if you supply it, and only that file.**
+  There is no bank connection, on purpose. Skip the statement drop and a charge
+  that exists with no expense row stays invisible, exactly as before.
+- **FX rates are yours, not the market's.** The "at your stated rates" view uses
+  numbers you typed; a hand-typed month-end rate rarely reconciles to the penny
+  against the card's actual conversion. That is why it is an estimate view and
+  never a finding.
 - **OCR quality on genuinely bad receipts is the weak point.** Tesseract handles clean
   scans well (94% confidence on the sample set) and struggles with crumpled, angled
   phone photos. Low-confidence reads are flagged, never silently accepted.
@@ -195,7 +222,7 @@ Read these before relying on it.
 ```bash
 npm install          # dev-only; the app itself has zero runtime dependencies
 npm run sample       # regenerate the sample data (needs Python + reportlab, openpyxl, pypdfium2)
-npm test             # 37 unit and integration tests
+npm test             # 87 unit and integration tests
 npm run serve        # http://localhost:8080
 node tools/browser-check.mjs   # drives the real page in a real browser
 node tools/a11y-check.mjs      # keyboard, focus, contrast, sorting, theming
@@ -209,15 +236,16 @@ external network request**. It also corrupts one PDF in a copy of the sample
 folder and asserts the run still renders all 40 rows with exactly one
 `UNREADABLE_RECEIPT`, because one bad file must cost one row and not the run.
 
-`a11y-check.mjs` asks whether the audit is **usable**. Twenty-two assertions,
-each one mapped to a defect that shipped in an earlier version: both file
-pickers reachable by Tab, focus moving into the evidence drawer and back out to
+`a11y-check.mjs` asks whether the audit is **usable**, with each assertion
+mapped to a defect that shipped in an earlier version: both file pickers
+reachable by Tab, focus moving into the evidence drawer and back out to
 the row that opened it, the table header actually sticking, sort order including
 the blanks-last rule, theme persistence across a reload, severity stated in
 words rather than colour alone, the evidence drawer paging through a multi-page
 receipt by keyboard, re-picking the receipts folder replacing the previous set
-instead of merging with it, and **every rendered text node measured against WCAG
-AA in both themes**. The contrast check is measured on the painted page, not
+instead of merging with it, reviewer decisions operable by keyboard alone with
+their pressed state exposed, every column-mapping select bound to a label, and
+**every rendered text node measured against WCAG AA in both themes**. The contrast check is measured on the painted page, not
 calculated from the tokens, so inherited colours and tinted parents cannot hide a
 failure.
 

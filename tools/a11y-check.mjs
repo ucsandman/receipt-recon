@@ -331,9 +331,9 @@ function twoPagePdf() {
 const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'recon-a11y-'));
 fs.writeFileSync(path.join(fixtureDir, 'TX-1000.pdf'), twoPagePdf());
 await page.setInputFiles('#fileReceipts', fixtureDir);
-await page.waitForFunction(() => /^1 PDF loaded/.test(document.getElementById('statusReceipts').textContent));
+await page.waitForFunction(() => /^1 receipt loaded/.test(document.getElementById('statusReceipts').textContent));
 const afterRepick = await page.textContent('#statusReceipts');
-assert.match(afterRepick, /^1 PDF loaded/,
+assert.match(afterRepick, /^1 receipt loaded/,
   `re-picking the folder must replace the previous set, got "${afterRepick}"`);
 pass('re-picking the receipts folder replaces the previous set rather than merging');
 
@@ -376,6 +376,65 @@ assert.equal(survived.rows, 40, `expected all 40 rows to survive, got ${survived
 pass(`a run with ${survived.unreadable} unreadable receipts still rendered all ${survived.rows} rows`);
 
 fs.rmSync(fixtureDir, { recursive: true, force: true });
+
+// ---- new controls are reachable and named ----------------------------------
+// Policy file buttons, the statement picker, the column-mapping selects and
+// the reviewer controls all arrived in one release; every one must be
+// focusable and carry an accessible name, or the "click, not command" story
+// only holds for mouse users.
+await page.click('#btnPolicy');   // the save/load buttons live in the panel
+for (const id of ['btnPolicySave', 'btnPolicyLoad', 'fileStatement', 'reviewerName',
+  'btnSaveReview', 'btnLoadReview']) {
+  const okFocus = await page.evaluate((i) => {
+    const el = document.getElementById(i);
+    if (!el) return `#${i} missing`;
+    el.focus();
+    return document.activeElement === el || `#${i} not focusable`;
+  }, id);
+  assert.equal(okFocus, true, String(okFocus));
+}
+pass('policy-file, statement and review-session controls are keyboard focusable');
+await page.click('#btnPolicy');
+
+const named = await page.evaluate(() => {
+  const name = (el) => el.getAttribute('aria-label') ||
+    (el.labels && el.labels.length ? el.labels[0].textContent.trim() : '') ||
+    el.textContent.trim();
+  return ['btnPolicySave', 'btnPolicyLoad', 'fileStatement', 'reviewerName', 'filePolicy', 'fileReview']
+    .map((i) => [i, !!name(document.getElementById(i))]);
+});
+assert.deepEqual(named.filter(([, ok2]) => !ok2), [], `unnamed controls: ${JSON.stringify(named)}`);
+pass('every new control carries an accessible name');
+
+// Column-mapping selects: each bound to a label, keyboard reachable.
+const colmapA11y = await page.evaluate(() => {
+  const sels = [...document.querySelectorAll('#colMapGrid select')];
+  return {
+    count: sels.length,
+    labelled: sels.every((s) => s.labels && s.labels.length === 1),
+  };
+});
+assert.equal(colmapA11y.count, 10, 'ten field selects should render');
+assert.equal(colmapA11y.labelled, true, 'every mapping select needs a bound label');
+pass('column-mapping selects are labelled');
+
+// Decision buttons toggle by keyboard alone and expose pressed state.
+await page.click('.chip[data-filter="exception"]');
+await page.click('#resultBody tr[data-txn] .rowbtn');
+await page.waitForSelector('#panel:not([hidden])');
+const kbDecide = await page.evaluate(() => {
+  const btn = document.querySelector('.decide-btn[data-decision="approved"]');
+  btn.focus();
+  return { focused: document.activeElement === btn, pressedBefore: btn.getAttribute('aria-pressed') };
+});
+assert.equal(kbDecide.focused, true, 'decision button must be focusable');
+assert.equal(kbDecide.pressedBefore, 'false');
+await page.keyboard.press('Enter');
+const pressedAfter = await page.evaluate(() =>
+  document.querySelector('.decide-btn[data-decision="approved"]').getAttribute('aria-pressed'));
+assert.equal(pressedAfter, 'true', 'Enter must toggle the decision and its aria-pressed state');
+pass('a reviewer decision can be made by keyboard alone, with pressed state exposed');
+await page.keyboard.press('Escape');
 
 assert.deepEqual(errors, [], `console errors: ${errors.join(' | ')}`);
 pass('no console errors across the whole run');
