@@ -80,6 +80,32 @@ export function sumsByCurrency(results, keep = () => true) {
     .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]));
 }
 
+/** One line per employee: exception count, review count, flagged value.
+ *
+ *  Auditors think per person — "who do I call first" — and pivoting the Detail
+ *  tab by hand every close is busywork. Ordered by each employee's largest
+ *  single-currency flagged value; the flagged figures themselves stay per
+ *  currency, because a summed EUR+USD number beside a named person would be
+ *  the exact defect sumsByCurrency exists to prevent, at finer grain. */
+export function employeeBreakdown(results) {
+  const byEmp = new Map();
+  for (const r of results) {
+    const key = String(r.row.employee || '').trim() || '(no employee)';
+    if (!byEmp.has(key)) byEmp.set(key, []);
+    byEmp.get(key).push(r);
+  }
+  return [...byEmp.entries()]
+    .map(([employee, rs]) => ({
+      employee,
+      exceptions: rs.filter((x) => x.status === 'exception').length,
+      review: rs.filter((x) => x.status === 'needs-review').length,
+      flagged: sumsByCurrency(rs, (x) => x.status !== 'clean'),
+    }))
+    .sort((a, b) =>
+      Math.abs(b.flagged[0]?.[1] ?? 0) - Math.abs(a.flagged[0]?.[1] ?? 0) ||
+      a.employee.localeCompare(b.employee));
+}
+
 export function buildWorkbook(XLSX, results, meta) {
   const wb = XLSX.utils.book_new();
   const { policy, generatedAt, reportName, receiptCount, ocrCount, hash } = meta;
@@ -128,6 +154,14 @@ export function buildWorkbook(XLSX, results, meta) {
   }
   for (const [code, n] of [...byRule].sort((a, b) => b[1] - a[1])) summary.push([`  ${code}`, n]);
 
+  summary.push([], ['By employee', 'Exceptions', 'Needs review', 'Value on flagged rows']);
+  for (const e of employeeBreakdown(results)) {
+    summary.push([
+      `  ${e.employee}`, e.exceptions, e.review,
+      e.flagged.map(([cur, v]) => `${v.toFixed(2)} ${cur}`).join(' + ') || '—',
+    ]);
+  }
+
   if (meta.budget) {
     summary.push([], ['Budget reconciliation (details on the Budget Recon tab)']);
     summary.push(['  Budget lines checked', meta.budget.lines.length]);
@@ -136,7 +170,7 @@ export function buildWorkbook(XLSX, results, meta) {
   }
 
   const wsSummary = XLSX.utils.aoa_to_sheet(summary);
-  wsSummary['!cols'] = [col(34), col(46)];
+  wsSummary['!cols'] = [col(34), col(46), col(13), col(24)];
   XLSX.utils.book_append_sheet(wb, wsSummary, 'Summary');
 
   // ---- Audit Detail ------------------------------------------------------
