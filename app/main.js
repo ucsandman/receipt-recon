@@ -9,7 +9,7 @@ import * as pdfjsLib from '../vendor/pdf.min.mjs';
 import { extractReceipt, clampScale } from './extract.js';
 import { mapHeaders, normalizeDate, toNumber, pickTransactionSheet } from './sheet.js';
 import { auditAll, sanitizePolicy, DEFAULT_POLICY } from './rules.js';
-import { parseBudgetSheet, pickBudgetSheet, reconcileBudget } from './budget.js';
+import { parseBudgetSheet, pickBudgetSheet, reconcileBudget, fxView } from './budget.js';
 import { buildWorkbook, downloadWorkbook, runHash, sumsByCurrency } from './report.js';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
@@ -338,6 +338,28 @@ function renderBudget() {
   const sheetName = state.budgetSheetIndex >= 0 ? state.sheets[state.budgetSheetIndex].name : '';
   $('budgetMeta').textContent =
     `Read from sheet “${sheetName}”. Each line is compared only to spend in its own currency; nothing was converted.`;
+
+  // The one labelled exception: an orientation view at rates the user typed.
+  const fx = fxView(lines, state.policy);
+  const fxBox = $('budgetFx');
+  if (fx) {
+    fxBox.innerHTML = `
+      <h4>At your stated rates</h4>
+      <p class="microcopy">${fx.rates.length
+        ? fx.rates.map(([c, r]) => `1 ${esc(c)} = ${r} ${esc(fx.base)}`).join(' · ')
+        : `every line is already in ${esc(fx.base)}`}</p>
+      <p class="budgetfx-totals">Budget ≈ ${money(fx.totals.budget, fx.base)} ·
+        Spent ≈ ${money(fx.totals.actual, fx.base)} ·
+        Difference ${money(fx.totals.delta, fx.base)}</p>
+      ${fx.missingRates.length ? `<p class="microcopy">No rate entered for ${fx.missingRates.map(esc).join(', ')}, so those lines are not in this estimate.</p>` : ''}
+      ${fx.excluded.length ? `<p class="microcopy">Left out (no stated currency): ${fx.excluded.map(esc).join(', ')}.</p>` : ''}
+      <p class="microcopy">Estimate only, converted at rates you entered by hand.
+        Every finding above compares within one currency; nothing was converted there.</p>`;
+    fxBox.hidden = false;
+  } else {
+    fxBox.hidden = true;
+    fxBox.innerHTML = '';
+  }
   card.hidden = false;
 }
 
@@ -687,6 +709,26 @@ function renderPolicy() {
         <input id="pc_newValue" type="number" step="any" placeholder="Limit">
         <button type="button" class="btn quiet small" id="pc_newAdd">Add</button>
       </div>
+    </div>` + `
+    <div class="policy-item">
+      <label for="p_fxBase">Converted view: base currency</label>
+      <input id="p_fxBase" type="text" maxlength="3" value="${esc(state.policy.fxBase)}" autocapitalize="characters">
+    </div>` +
+    Object.entries(state.policy.fxRates).map(([code, v]) => `
+    <div class="policy-item">
+      <label for="fx_${esc(code)}">1 ${esc(code)} in ${esc(state.policy.fxBase)}</label>
+      <input id="fx_${esc(code)}" data-fx="${esc(code)}" type="number" step="any" min="0" value="${v}">
+    </div>`).join('') + `
+    <div class="policy-item">
+      <label for="fx_newCode">Add an FX rate</label>
+      <div class="policy-addrow">
+        <input id="fx_newCode" type="text" maxlength="3" placeholder="EUR" autocapitalize="characters">
+        <input id="fx_newRate" type="number" step="any" min="0" placeholder="1.08">
+        <button type="button" class="btn quiet small" id="fx_newAdd">Add</button>
+      </div>
+      <span class="policy-hint">Month-end rates you choose, kept on this computer. They feed only the
+      clearly labelled “at your stated rates” view. No finding ever converts a currency.
+      Clear a rate to remove it.</span>
     </div>` +
     POLICY_LIST_FIELDS.map(([key, label, hint]) => `
     <div class="policy-item wide">
@@ -714,6 +756,43 @@ function renderPolicy() {
       if (Number.isFinite(n)) { state.policy.categoryLimits[e.target.dataset.cat] = n; savePolicy(); }
     });
   }
+  $('p_fxBase').addEventListener('change', (e) => {
+    const code = e.target.value.trim().toUpperCase();
+    if (/^[A-Z]{3}$/.test(code)) {
+      state.policy.fxBase = code;
+      savePolicy();
+      renderPolicy();          // rate labels name the base, so they re-render
+      renderBudget();          // a visible converted view follows the rates live
+    } else {
+      e.target.value = state.policy.fxBase;
+    }
+  });
+  for (const input of $('policyGrid').querySelectorAll('input[data-fx]')) {
+    input.addEventListener('change', (e) => {
+      const code = e.target.dataset.fx;
+      const n = parseFloat(e.target.value);
+      if (Number.isFinite(n) && n > 0) {
+        state.policy.fxRates[code] = n;
+        savePolicy();
+      } else {
+        // Clearing the field removes the rate, and with it the converted line.
+        delete state.policy.fxRates[code];
+        savePolicy();
+        renderPolicy();
+      }
+      renderBudget();
+    });
+  }
+  $('fx_newAdd').addEventListener('click', () => {
+    const code = $('fx_newCode').value.trim().toUpperCase();
+    const n = parseFloat($('fx_newRate').value);
+    if (!/^[A-Z]{3}$/.test(code) || !Number.isFinite(n) || n <= 0) return;
+    state.policy.fxRates[code] = n;
+    savePolicy();
+    renderPolicy();
+    renderBudget();
+    $('fx_newCode').focus();
+  });
   $('pc_newAdd').addEventListener('click', () => {
     const cat = $('pc_newName').value.trim();
     const n = parseFloat($('pc_newValue').value);
@@ -1025,6 +1104,9 @@ function init() {
       const budget = state.budgetRecon ? {
         ...state.budgetRecon,
         sheetName: state.budgetSheetIndex >= 0 ? state.sheets[state.budgetSheetIndex].name : '',
+        // The converted view rides along for the workbook; it is not hash
+        // material and reconcileBudget's lines are untouched by it.
+        fx: fxView(state.budgetRecon.lines, state.policy),
       } : null;
       const hash = await runHash(state.results, state.policy, state.budgetRecon);
       const wb = buildWorkbook(XLSX, state.results, {

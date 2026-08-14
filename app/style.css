@@ -594,6 +594,11 @@ td.mono { font-family: var(--mono); font-size: var(--t-sm); white-space: nowrap;
 .budgetcard .tablewrap { margin-top: var(--s-3); }
 .budgetcard #budgetFindings { margin-top: var(--s-3); }
 
+/* "At your stated rates": the labelled FX estimate under the budget table. */
+.budgetfx { margin-top: var(--s-3); padding-top: var(--s-3); border-top: 1px dashed var(--line); }
+.budgetfx h4 { margin: 0 0 var(--s-1); font-size: var(--t-md); }
+.budgetfx-totals { margin: var(--s-1) 0; font-weight: 600; }
+
 /* A flagged-value tile listing more than one currency. */
 .tile .n.n-multi { font-size: var(--t-lg); line-height: 1.35; }
 

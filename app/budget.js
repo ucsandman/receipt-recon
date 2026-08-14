@@ -98,6 +98,50 @@ export function pickBudgetSheet(sheets, excludeIndex) {
   return best;
 }
 
+/** The one deliberate exception to "never convert": an orientation view at
+ *  rates the USER stated by hand, kept apart from every finding and clearly
+ *  labelled wherever it is shown. reconcileBudget above stays conversion-free;
+ *  this reads its output and never feeds anything back.
+ *
+ *  @param lines   reconcileBudget().lines
+ *  @param policy  { fxBase, fxRates } — fxRates[CODE] = units of fxBase per 1 CODE
+ *  @returns null when no rates are configured or no line carries a currency. */
+export function fxView(lines, policy = {}) {
+  const base = String(policy.fxBase || 'USD').toUpperCase();
+  const rates = policy.fxRates || {};
+  if (!Object.keys(rates).length) return null;
+  if (!lines.some((l) => l.currency)) return null;
+
+  const rateFor = (cur) => cur === base ? 1 : (typeof rates[cur] === 'number' && rates[cur] > 0 ? rates[cur] : null);
+
+  const rows = [];
+  const usedRates = new Map();
+  const missing = new Set();
+  const excluded = [];
+  const totals = { budget: 0, actual: 0 };
+  for (const l of lines) {
+    if (!l.currency) { excluded.push(l.label); continue; }
+    const rate = rateFor(l.currency);
+    if (rate === null) { missing.add(l.currency); continue; }
+    if (l.currency !== base) usedRates.set(l.currency, rate);
+    const budgetBase = round2(l.budget * rate);
+    const actualBase = l.actual == null ? null : round2(l.actual * rate);
+    rows.push({ label: l.label, currency: l.currency, budgetBase, actualBase,
+      deltaBase: actualBase == null ? null : round2(actualBase - budgetBase) });
+    totals.budget = round2(totals.budget + budgetBase);
+    totals.actual = round2(totals.actual + (actualBase ?? 0));
+  }
+  if (!rows.length) return null;
+  return {
+    base,
+    rates: [...usedRates.entries()],
+    rows,
+    totals: { ...totals, delta: round2(totals.actual - totals.budget) },
+    missingRates: [...missing],
+    excluded,
+  };
+}
+
 /** Cross-foot the report against the budget, per category and per currency.
  *
  *  @returns { lines, findings } where lines mirror the budget entries with the

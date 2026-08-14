@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url';
 
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { extractReceipt } from '../app/extract.js';
-import { auditAll, vendorSimilarity, sanitizePolicy, DEFAULT_POLICY, SEVERITY } from '../app/rules.js';
+import { auditAll, vendorSimilarity, sanitizePolicy, DEFAULT_POLICY, SEVERITY, RULESET_VERSION } from '../app/rules.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TRUTH = JSON.parse(fs.readFileSync(path.join(ROOT, 'sample-data/ground-truth.json'), 'utf8'));
@@ -132,7 +132,7 @@ test('every finding carries the evidence needed to defend it', async () => {
     for (const f of r.findings) {
       assert.ok(f.code, 'finding needs a rule code');
       assert.ok(f.message && f.message.length > 15, `finding ${f.code} needs a human-readable reason`);
-      assert.equal(f.ruleset, '1.0.0', 'finding must record the ruleset version that produced it');
+      assert.equal(f.ruleset, RULESET_VERSION, 'finding must record the ruleset version that produced it');
       assert.ok(Object.values(SEVERITY).includes(f.severity), `bad severity on ${f.code}`);
     }
   }

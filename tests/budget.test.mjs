@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  parseBudgetSheet, pickBudgetSheet, reconcileBudget,
+  parseBudgetSheet, pickBudgetSheet, reconcileBudget, fxView,
 } from '../app/budget.js';
 
 // --------------------------------------------------------------------------
@@ -162,4 +162,47 @@ test('category matching ignores case and surrounding space', () => {
     [row('  meals ', 600, 'USD')],
     [{ label: 'MEALS', currency: 'USD', budget: 500 }]);
   assert.equal(lines[0].status, 'over');
+});
+
+// --------------------------------------------------------------------------
+// fxView: the ONLY place a currency conversion exists in this codebase, and it
+// is an orientation view at rates the user typed by hand, never a finding.
+// --------------------------------------------------------------------------
+
+const fxLine = (over = {}) => ({
+  label: 'Travel', currency: 'EUR', budget: 1000, actual: 1080, delta: 80, status: 'over', ...over,
+});
+
+test('a rated line converts into the base currency at the stated rate', () => {
+  const v = fxView([fxLine()], { fxBase: 'USD', fxRates: { EUR: 1.08 } });
+  assert.equal(v.base, 'USD');
+  assert.equal(v.rows[0].budgetBase, 1080);
+  assert.equal(v.rows[0].actualBase, 1166.4);
+  assert.equal(v.totals.actual, 1166.4);
+  assert.deepEqual(v.rates, [['EUR', 1.08]]);
+});
+
+test('no rates configured means no converted view at all', () => {
+  assert.equal(fxView([fxLine()], { fxBase: 'USD', fxRates: {} }), null);
+  assert.equal(fxView([fxLine()], { fxBase: 'USD' }), null);
+});
+
+test('a currency with no stated rate is named missing, not guessed', () => {
+  const v = fxView([fxLine(), fxLine({ label: 'Lodging', currency: 'GBP', budget: 500, actual: 200, delta: -300 })],
+    { fxBase: 'USD', fxRates: { EUR: 1.08 } });
+  assert.deepEqual(v.missingRates, ['GBP']);
+  assert.equal(v.rows.length, 1);
+  assert.equal(v.totals.budget, 1080);
+});
+
+test('a line with no currency is excluded by label', () => {
+  const v = fxView([fxLine(), fxLine({ label: 'Mystery', currency: null })],
+    { fxBase: 'USD', fxRates: { EUR: 1.08 } });
+  assert.deepEqual(v.excluded, ['Mystery']);
+});
+
+test('the base currency converts at 1 without needing its own entry', () => {
+  const v = fxView([fxLine({ currency: 'USD' })], { fxBase: 'USD', fxRates: { EUR: 1.08 } });
+  assert.equal(v.rows[0].budgetBase, 1000);
+  assert.deepEqual(v.rates, []);
 });

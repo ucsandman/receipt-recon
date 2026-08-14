@@ -9,7 +9,10 @@
 // No network calls. No AI. Just arithmetic and table lookups over the fields
 // the extractor read off the PDF.
 
-export const RULESET_VERSION = '1.0.0';
+// 1.1.0: the policy gained fxBase/fxRates and statementDateToleranceDays, and
+// the policy object is hash material, so every hash moved. Recorded here so a
+// reviewer comparing hashes across months knows why the boundary exists.
+export const RULESET_VERSION = '1.1.0';
 
 export const DEFAULT_POLICY = {
   // ---- documentation thresholds -----------------------------------------
@@ -54,6 +57,13 @@ export const DEFAULT_POLICY = {
     'champagne', 'prosecco', 'cocktail', 'liquor', 'spirits', 'brewery', 'ale'],
   personalKeywords: ['netflix', 'streamflix', 'hulu', 'disney+', 'spotify', 'xbox',
     'playstation', 'personal account', 'gym membership', 'grocery'],
+
+  // ---- stated FX rates (optional) -----------------------------------------
+  // Typed by the user, never fetched. Used ONLY by the clearly labelled
+  // "at your stated rates" view on the budget card and in the workbook.
+  // No finding and no comparison ever converts a currency.
+  fxBase: 'USD',
+  fxRates: {},            // e.g. { EUR: 1.08 } means 1 EUR = 1.08 USD
 
   // ---- process -----------------------------------------------------------
   staleSubmissionDays: 60,

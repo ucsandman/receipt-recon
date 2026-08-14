@@ -218,6 +218,18 @@ export function buildWorkbook(XLSX, results, meta) {
       bud.push([], ['Findings']);
       for (const f of meta.budget.findings) bud.push([f.code, f.message]);
     }
+    // The one labelled conversion in the whole workbook: rates the user typed.
+    if (meta.budget.fx) {
+      const fx = meta.budget.fx;
+      bud.push([], ['At your stated rates (estimate only)']);
+      for (const [c, r] of fx.rates) bud.push([`  1 ${c}`, `${r} ${fx.base}`]);
+      bud.push([`  Converted budget (${fx.base})`, fx.totals.budget]);
+      bud.push([`  Converted spend (${fx.base})`, fx.totals.actual]);
+      bud.push([`  Difference (${fx.base})`, fx.totals.delta]);
+      if (fx.missingRates.length) bud.push(['  No rate entered for', fx.missingRates.join(', ')]);
+      if (fx.excluded.length) bud.push(['  Left out (no stated currency)', fx.excluded.join(', ')]);
+      bud.push(['  Rule', 'Converted at rates the user typed by hand, for orientation only. Every finding and every line above compares within one currency.']);
+    }
     const wsBud = XLSX.utils.aoa_to_sheet(bud);
     wsBud['!cols'] = [26, 11, 12, 12, 12, 110].map(col);
     XLSX.utils.book_append_sheet(wb, wsBud, 'Budget Recon');
