@@ -603,6 +603,28 @@ td.mono { font-family: var(--mono); font-size: var(--t-sm); white-space: nowrap;
 /* A flagged-value tile listing more than one currency. */
 .tile .n.n-multi { font-size: var(--t-lg); line-height: 1.35; }
 
+/* ---------- reviewer decisions ---------- */
+.decide { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1); margin-top: var(--s-2); }
+.decide-btn[aria-pressed="true"] {
+  background: var(--accent); color: var(--accent-ink); border-color: var(--accent);
+}
+.decide-note {
+  flex: 1 1 150px; min-width: 0; padding: 5px 8px;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--bg); color: var(--ink); font-size: var(--t-sm);
+}
+.decided-mark { color: var(--accent); font-weight: 700; }
+.reviewbar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2);
+  margin: var(--s-2) 0 var(--s-3);
+}
+.reviewbar #reviewerName {
+  padding: 6px 10px; border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--bg); color: var(--ink); width: 170px;
+}
+.review-progress { color: var(--ink-2); font-size: var(--t-sm); flex: 1 1 auto; }
+.reviewbar-actions { display: flex; gap: var(--s-1); }
+
 /* ---------- column-mapping disclosure ---------- */
 .colmap {
   margin: var(--s-3) 0; padding: var(--s-2) var(--s-3);

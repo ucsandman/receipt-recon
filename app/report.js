@@ -214,7 +214,11 @@ export function buildWorkbook(XLSX, results, meta) {
     }
   }
   flat.sort((a, b) => (order[a.f.severity] - order[b.f.severity]) || a.r.row.txnId.localeCompare(b.r.row.txnId));
+  // Decisions made in the evidence drawer pre-fill the sign-off columns.
+  // Anything undecided stays blank: a blank means the item is still open.
+  const REVIEW_LABEL = { approved: 'Approved', rejected: 'Rejected', 'follow-up': 'Needs follow-up' };
   for (const { r, f } of flat) {
+    const rv = meta.reviews?.get(`${r.row.txnId}::${f.code}`);
     exc.push([
       r.row.txnId,
       f.severity === SEVERITY.HARD ? 'Exception' : 'Review',
@@ -225,7 +229,10 @@ export function buildWorkbook(XLSX, results, meta) {
       f.threshold ?? '',
       r.row.receiptFile || '',
       f.ruleset,
-      '', '', '', '',                       // reviewer fills these in
+      rv?.decision ? REVIEW_LABEL[rv.decision] ?? '' : '',
+      rv?.reviewer ?? '',
+      rv?.date ?? '',
+      rv?.note ?? '',
     ]);
   }
   const wsExc = XLSX.utils.aoa_to_sheet(exc);

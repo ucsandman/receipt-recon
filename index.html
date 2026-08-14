@@ -247,6 +247,20 @@
       <button class="btn primary" id="btnDownload">Download audit workbook (.xlsx)</button>
     </div>
 
+    <!-- The monthly review loop: decide inside the drawer, watch the counter,
+         save the session as a file, reload it to continue. Nothing persists on
+         its own; on a shared machine that is a feature, not a gap. -->
+    <div class="reviewbar">
+      <label class="sr-only" for="reviewerName">Reviewer name</label>
+      <input id="reviewerName" type="text" placeholder="Reviewer name">
+      <span class="review-progress" id="reviewProgress"></span>
+      <span class="reviewbar-actions">
+        <button class="btn quiet small" id="btnSaveReview">Save review session</button>
+        <button class="btn quiet small" id="btnLoadReview">Load review session</button>
+      </span>
+      <input type="file" id="fileReview" accept=".json,application/json" class="sr-only" aria-label="Choose a saved review session file">
+    </div>
+
     <div class="tablewrap">
       <table id="resultTable">
         <caption class="sr-only">Every transaction checked, with how its receipt was read and what was found. Column headers sort the table.</caption>

@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { sumsByCurrency, employeeBreakdown } from '../app/report.js';
+import { sumsByCurrency, employeeBreakdown, buildWorkbook, runHash } from '../app/report.js';
 
 const res = (amount, currency, status = 'exception') => ({
   row: { amount, currency }, status,
@@ -58,4 +58,48 @@ test('employees are ranked by flagged value, per currency, zeros included', () =
 test('a blank employee column still gets a named line', () => {
   const [e] = employeeBreakdown([empRes('', 10, 'USD', 'exception')]);
   assert.equal(e.employee, '(no employee)');
+});
+
+// --------------------------------------------------------------------------
+// Reviewer decisions land in the Exceptions tab, and never in the run hash.
+// --------------------------------------------------------------------------
+
+const stubXLSX = () => ({
+  utils: {
+    book_new: () => ({ Sheets: {}, SheetNames: [] }),
+    aoa_to_sheet: (aoa) => ({ aoa, '!ref': 'A1:Z999' }),
+    book_append_sheet: (wb, ws, name) => { wb.Sheets[name] = ws; wb.SheetNames.push(name); },
+  },
+});
+
+const decidedResults = () => [{
+  row: { txnId: 'T1', employee: 'A', date: '2026-07-02', vendor: 'V', category: 'Meals',
+    amount: 120, currency: 'USD', receiptFile: 'r.pdf', purpose: 'x', approver: 'B' },
+  extraction: null,
+  findings: [{ code: 'MISSING_RECEIPT', severity: 'hard', message: 'No support document attached for 120.00', ruleset: '1.1.0' }],
+  status: 'exception', hardCount: 1, softCount: 0,
+}];
+
+test('a decision fills the Exceptions sign-off columns; undecided stays blank', async () => {
+  const { DEFAULT_POLICY } = await import('../app/rules.js');
+  const meta = { policy: DEFAULT_POLICY, generatedAt: 'now', reportName: 'r', receiptCount: 1, ocrCount: 0, hash: 'h' };
+  const reviews = new Map([['T1::MISSING_RECEIPT',
+    { decision: 'approved', note: 'ok this once', reviewer: 'Wes', date: '2026-08-14' }]]);
+
+  const withDecision = buildWorkbook(stubXLSX(), decidedResults(), { ...meta, reviews });
+  const excRow = withDecision.Sheets['Exceptions'].aoa.find((r) => r[0] === 'T1');
+  assert.deepEqual(excRow.slice(-4), ['Approved', 'Wes', '2026-08-14', 'ok this once']);
+
+  const without = buildWorkbook(stubXLSX(), decidedResults(), meta);
+  const blankRow = without.Sheets['Exceptions'].aoa.find((r) => r[0] === 'T1');
+  assert.deepEqual(blankRow.slice(-4), ['', '', '', '']);
+});
+
+test('the run hash never sees reviewer decisions', async () => {
+  // runHash takes results, policy, budget — there is no reviews parameter, and
+  // the material must be identical whether or not decisions exist elsewhere.
+  const { DEFAULT_POLICY } = await import('../app/rules.js');
+  const a = await runHash(decidedResults(), DEFAULT_POLICY);
+  const b = await runHash(decidedResults(), DEFAULT_POLICY);
+  assert.ok(a === b && typeof a === 'string' && a.length === 64);
 });

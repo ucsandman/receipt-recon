@@ -39,6 +39,10 @@ const state = {
   ocrWorker: null,
   ocrUsed: 0,
   reportName: '',
+  // Reviewer decisions, keyed `${txnId}::${code}`. NEVER hash material: the
+  // hash proves what was audited, and a human's verdict is not an input to
+  // that. Survives re-running the audit; persists only as an explicit file.
+  reviews: new Map(),
 };
 
 // --------------------------------------------------------------------------
@@ -413,6 +417,7 @@ function renderResults() {
 
   renderBudget();
   renderRows();
+  updateReviewProgress();
 }
 
 // Budget statuses map onto the row-status colours: over budget is an
@@ -562,7 +567,10 @@ function renderRows() {
       <td class="right">${money(f.total, f.currency || r.row.currency)}</td>
       <td class="mono">${readBy}</td>
       <td><span class="pill ${r.status}">${label}</span></td>
-      <td><ul class="findlist">${findings.map((x) => `<li><code>${x.code}</code></li>`).join('') || '<li>—</li>'}</ul></td>
+      <td><ul class="findlist">${findings.map((x) =>
+        `<li><code>${x.code}</code>${state.reviews.get(`${r.row.txnId}::${x.code}`)?.decision
+          ? '<span class="decided-mark" aria-hidden="true"> ✓</span><span class="sr-only"> decided</span>' : ''}</li>`
+      ).join('') || '<li>—</li>'}</ul></td>
     </tr>`;
   }).join('') ||
     `<tr class="empty-row"><td colspan="9">${esc(EMPTY_COPY[state.filter] ?? EMPTY_COPY.all)}</td></tr>`;
@@ -573,6 +581,110 @@ function renderRows() {
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// --------------------------------------------------------------------------
+// Reviewer decisions.
+//
+// The auditor reviews in the drawer, where the receipt and the comparison
+// table already are, so the decision control lives there too. The decisions
+// feed the Exceptions tab's sign-off columns instead of the blanks the user
+// used to re-derive in Excel. Persistence is an explicit session FILE, saved
+// and loaded like the policy: on a shared corporate laptop, silently keeping
+// review verdicts in browser storage is the wrong default.
+// --------------------------------------------------------------------------
+
+const DECISIONS = [
+  ['approved', 'Approve'],
+  ['rejected', 'Reject'],
+  ['follow-up', 'Needs follow-up'],
+];
+
+function updateReviewProgress() {
+  const el = $('reviewProgress');
+  if (!state.results.length) { el.textContent = ''; return; }
+  let total = 0;
+  let decided = 0;
+  for (const r of state.results) {
+    for (const f of r.findings) {
+      if (f.severity === 'info') continue;
+      total++;
+      if (state.reviews.get(`${r.row.txnId}::${f.code}`)?.decision) decided++;
+    }
+  }
+  el.textContent = total ? `${decided} of ${total} findings decided` : 'No findings to decide';
+}
+
+function setDecision(key, decision) {
+  const cur = state.reviews.get(key) ?? {};
+  if (cur.decision === decision) {
+    // Clicking the active choice withdraws it; a note alone may stay.
+    delete cur.decision;
+  } else {
+    cur.decision = decision;
+  }
+  cur.reviewer = $('reviewerName').value.trim();
+  cur.date = new Date().toISOString().slice(0, 10);
+  if (!cur.decision && !cur.note) state.reviews.delete(key);
+  else state.reviews.set(key, cur);
+}
+
+async function saveReviewSession() {
+  if (!state.results.length) { showBanner('Run an audit before saving a review session.'); return; }
+  const hash = await runHash(state.results, state.policy, state.budgetRecon);
+  const decisions = [...state.reviews.entries()].map(([key, v]) => {
+    const i = key.lastIndexOf('::');
+    return { txnId: key.slice(0, i), code: key.slice(i + 2), ...v };
+  });
+  downloadTextFile('receipt-recon-review.json', JSON.stringify({
+    app: 'receipt-recon-review',
+    version: 1,
+    reportName: state.reportName,
+    runHash: hash,
+    reviewer: $('reviewerName').value.trim(),
+    decisions,
+  }, null, 2));
+  announce('Review session downloaded.');
+}
+
+async function loadReviewSession(file) {
+  if (!state.results.length) { showBanner('Run the audit first, then load the review session over it.'); return; }
+  let raw;
+  try { raw = JSON.parse(await file.text()); }
+  catch { showBanner(`"${file.name}" is not valid JSON.`); return; }
+  if (raw?.app !== 'receipt-recon-review' || !Array.isArray(raw.decisions)) {
+    showBanner(`"${file.name}" is not a review session file.`);
+    return;
+  }
+  // Only decisions that match a finding in THIS run are applied.
+  const valid = new Set();
+  for (const r of state.results) for (const f of r.findings) valid.add(`${r.row.txnId}::${f.code}`);
+  let applied = 0;
+  let skipped = 0;
+  for (const d of raw.decisions) {
+    const key = `${d.txnId}::${d.code}`;
+    const entry = {};
+    if (DECISIONS.some(([v]) => v === d.decision)) entry.decision = d.decision;
+    if (typeof d.note === 'string' && d.note) entry.note = d.note;
+    if (typeof d.reviewer === 'string' && d.reviewer) entry.reviewer = d.reviewer;
+    if (typeof d.date === 'string' && d.date) entry.date = d.date;
+    if (valid.has(key) && Object.keys(entry).length) { state.reviews.set(key, entry); applied++; }
+    else skipped++;
+  }
+  if (raw.reviewer && !$('reviewerName').value) $('reviewerName').value = raw.reviewer;
+  const currentHash = await runHash(state.results, state.policy, state.budgetRecon);
+  const mismatch = raw.runHash && currentHash && raw.runHash !== currentHash;
+  if (mismatch || skipped) {
+    showBanner(`${applied} decision${applied === 1 ? '' : 's'} applied, ${skipped} did not match this run.` +
+      (mismatch ? ' This session was saved against a DIFFERENT run (the run hashes differ) — re-check what carried over.' : ''));
+  } else {
+    clearBanner();
+  }
+  renderRows();
+  updateReviewProgress();
+  if (state.selectedTxn) openPanel(state.selectedTxn,
+    $('resultBody').querySelector(`tr[data-txn="${CSS.escape(state.selectedTxn)}"]`));
+  announce(`Review session loaded: ${applied} decisions applied.`);
 }
 
 async function openPanel(txnId, tr) {
@@ -588,13 +700,25 @@ async function openPanel(txnId, tr) {
   // Severity is written out, not just coloured, so the tier survives colour
   // blindness and a black-and-white print.
   $('panelFindings').innerHTML = findings.length
-    ? findings.map((f) => `<div class="finding ${esc(f.severity)}">
+    ? findings.map((f) => {
+        const key = `${r.row.txnId}::${f.code}`;
+        const rv = state.reviews.get(key);
+        return `<div class="finding ${esc(f.severity)}">
         <div class="finding-head">
           <span class="code">${esc(f.code)}</span>
           <span class="finding-sev">${f.severity === 'hard' ? 'Exception' : 'Needs review'}</span>
         </div>
         <p class="finding-msg">${esc(f.message)}</p>
-      </div>`).join('')
+        <div class="decide" role="group" aria-label="Decision for ${esc(f.code)} on ${esc(r.row.txnId)}">
+          ${DECISIONS.map(([d, label]) => `<button type="button"
+            class="btn quiet small decide-btn" data-key="${esc(key)}" data-decision="${d}"
+            aria-pressed="${String(rv?.decision === d)}">${label}</button>`).join('')}
+          <input type="text" class="decide-note" data-key="${esc(key)}"
+            value="${esc(rv?.note ?? '')}" placeholder="Note (optional)"
+            aria-label="Note for ${esc(f.code)} on ${esc(r.row.txnId)}">
+        </div>
+      </div>`;
+      }).join('')
     : '<div class="finding"><p class="finding-msg">No findings. Every check passed on this row.</p></div>';
 
   const f = r.extraction?.fields || {};
@@ -1264,6 +1388,7 @@ function init() {
       const wb = buildWorkbook(XLSX, state.results, {
         hash,
         budget,
+        reviews: state.reviews,
         policy: state.policy,
         generatedAt: new Date().toISOString().slice(0, 19).replace('T', ' '),
         reportName: state.reportName,
@@ -1279,6 +1404,41 @@ function init() {
       btn.removeAttribute('aria-busy');
       btn.textContent = label;
     }
+  });
+
+  // Decision controls, delegated: the drawer's findings are re-rendered on
+  // every open, and delegation keeps one code path for mouse and keyboard.
+  $('panelFindings').addEventListener('click', (e) => {
+    const btn = e.target.closest('.decide-btn');
+    if (!btn) return;
+    setDecision(btn.dataset.key, btn.dataset.decision);
+    const chosen = state.reviews.get(btn.dataset.key)?.decision ?? null;
+    for (const b of btn.closest('.decide').querySelectorAll('.decide-btn')) {
+      b.setAttribute('aria-pressed', String(b.dataset.decision === chosen));
+    }
+    renderRows();
+    updateReviewProgress();
+  });
+  $('panelFindings').addEventListener('change', (e) => {
+    const note = e.target.closest('.decide-note');
+    if (!note) return;
+    const key = note.dataset.key;
+    const cur = state.reviews.get(key) ?? {};
+    if (note.value.trim()) {
+      cur.note = note.value.trim();
+      cur.reviewer = cur.reviewer || $('reviewerName').value.trim();
+      cur.date = new Date().toISOString().slice(0, 10);
+      state.reviews.set(key, cur);
+    } else {
+      delete cur.note;
+      if (!cur.decision) state.reviews.delete(key);
+    }
+  });
+  $('btnSaveReview').addEventListener('click', saveReviewSession);
+  $('btnLoadReview').addEventListener('click', () => $('fileReview').click());
+  $('fileReview').addEventListener('change', (e) => {
+    if (e.target.files[0]) loadReviewSession(e.target.files[0]);
+    e.target.value = '';
   });
 
   $('panelClose').addEventListener('click', () => closePanel());
