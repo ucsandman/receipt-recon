@@ -24,10 +24,24 @@ export const COLUMN_ALIASES = {
 export function mapHeaders(header) {
   const norm = header.map((h) => String(h ?? '').trim().toLowerCase());
   const map = {};
-  for (const [field, aliases] of Object.entries(COLUMN_ALIASES)) {
-    let idx = norm.findIndex((h) => aliases.includes(h));
-    if (idx === -1) idx = norm.findIndex((h) => h && aliases.some((a) => h.includes(a)));
-    if (idx !== -1) map[field] = idx;
+  const claimed = new Set();
+  const fields = Object.entries(COLUMN_ALIASES);
+
+  // Every exact match binds before ANY substring fallback runs, and a bound
+  // column is claimed. Without this, a header like 'Receipt Amount' — which
+  // contains both the amount alias 'amount' and the receiptFile alias
+  // 'receipt' — let one column feed two fields, and the guess that lost was
+  // invisible: every row just came out UNREADABLE_RECEIPT. Field order in
+  // COLUMN_ALIASES settles a contested exact tie, deterministically.
+  for (const [field, aliases] of fields) {
+    const idx = norm.findIndex((h, i) => !claimed.has(i) && aliases.includes(h));
+    if (idx !== -1) { map[field] = idx; claimed.add(idx); }
+  }
+  for (const [field, aliases] of fields) {
+    if (map[field] !== undefined) continue;
+    const idx = norm.findIndex((h, i) =>
+      !claimed.has(i) && h && aliases.some((a) => h.includes(a)));
+    if (idx !== -1) { map[field] = idx; claimed.add(idx); }
   }
   return map;
 }

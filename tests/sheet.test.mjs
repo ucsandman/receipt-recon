@@ -102,6 +102,28 @@ test('an exact header match wins over a substring match', () => {
   assert.equal(m.amount, 2);
 });
 
+test('a header containing two aliases cannot bind two fields to one column', () => {
+  // 'Receipt Amount' contains the amount alias 'amount' AND the receiptFile
+  // alias 'receipt', and 'Receipt Files' (plural) is not an exact alias, so
+  // receiptFile's substring scan hits the dollar column FIRST. Before claim
+  // tracking that bound receiptFile to the amounts and every row became
+  // UNREADABLE_RECEIPT with nothing pointing at the cause. A claimed column
+  // must stay claimed.
+  const m = mapHeaders(['Txn', 'Receipt Amount', 'Receipt Files']);
+  assert.equal(m.amount, 1, 'the dollar column is the amount');
+  assert.equal(m.receiptFile, 2, 'the file column is the receipt file');
+  assert.equal(m.txnId, 0);
+});
+
+test('the sample workbook header row maps exactly as it always has', () => {
+  const m = mapHeaders(['Txn ID', 'Employee', 'Date', 'Vendor', 'Category',
+    'Amount', 'Currency', 'Receipt File', 'Business Purpose', 'Approver']);
+  assert.deepEqual(m, {
+    txnId: 0, employee: 1, date: 2, vendor: 3, category: 4,
+    amount: 5, currency: 6, receiptFile: 7, purpose: 8, approver: 9,
+  });
+});
+
 test('money parses out of the formats a spreadsheet actually holds', () => {
   assert.equal(toNumber(1234.5), 1234.5);
   assert.equal(toNumber('$1,234.50'), 1234.5);
